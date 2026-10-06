@@ -37,6 +37,7 @@
   function P(pid) { return S.players[pid]; }
   function players() { return S.order.map(P).filter(Boolean); }
   function aliveCount(p) { return p.slots.filter(function (s) { return s && s.alive; }).length; }
+  function roundOptions() { return CFG.roundOptions || [3, 4, 5, 6]; }
   function builtCount(p) { return p.slots.filter(function (s) { return s && !s.auto; }).length; }
   function isOnline(p) { var c = conns[p.pid]; return !!(c && c.open && now() - p.lastSeen < 9000); }
   function onlinePlayers() { return players().filter(isOnline); }
@@ -66,22 +67,83 @@
       if (!p.slots[i]) p.slots[i] = { card: free.shift().id, auto: true, alive: true, lostTo: null };
     }
   }
+  function crackedCount(p) { return p.slots.filter(function (s) { return s && s.alive && s.cracked; }).length; }
+  /* A FULL loss (wrong answer, chaos card): destroys an UNCRACKED plan if there is one, so a pending
+     crack (= half a plan already lost) stays pending. Only when the cracked plan is the last one left
+     is it the one destroyed (and the crack goes with it). */
   function destroy(p, emoji) {
     var alive = [];
     p.slots.forEach(function (s, i) { if (s && s.alive) alive.push(i); });
     if (!alive.length) return -1;
-    var i = alive[Math.floor(Math.random() * alive.length)];
-    p.slots[i].alive = false; p.slots[i].lostTo = emoji || '💥';
+    var pool = alive.filter(function (i) { return !p.slots[i].cracked; });
+    if (!pool.length) pool = alive;
+    var i = pool[Math.floor(Math.random() * pool.length)];
+    p.slots[i].alive = false; p.slots[i].cracked = false; p.slots[i].lostTo = emoji || '💥';
     return i;
   }
+  /* v2 balance: a TIMEOUT (too slow / no answer) costs HALF a plan. The first timeout cracks a plan;
+     the next timeout destroys that cracked plan (−1) and the crack counter starts again.
+     Returns { lost: slot index or -1, cracked: slot index or -1 }. */
+  function crack(p, emoji) {
+    var c = -1, alive = [];
+    p.slots.forEach(function (s, i) { if (s && s.alive) { alive.push(i); if (s.cracked && c < 0) c = i; } });
+    if (c >= 0) { p.slots[c].alive = false; p.slots[c].cracked = false; p.slots[c].lostTo = emoji || '💥'; return { lost: c, cracked: -1 }; }
+    if (!alive.length) return { lost: -1, cracked: -1 };
+    var i = alive[Math.floor(Math.random() * alive.length)];
+    p.slots[i].cracked = true;
+    return { lost: -1, cracked: i };
+  }
+  /* v2 balance: COMEBACK. A correct answer while on 0 or 1 plans rebuilds one destroyed plan,
+     at most CFG.maxRebuilds (2) times per student per game. The host is authoritative (p.rebuilds). */
+  function comeback(p) {
+    if (aliveCount(p) > 1 || (p.rebuilds || 0) >= (CFG.maxRebuilds == null ? 2 : CFG.maxRebuilds)) return -1;
+    var dead = [], empty = [];
+    p.slots.forEach(function (s, i) { if (!s || s.late) empty.push(i); else if (!s.alive) dead.push(i); });
+    var i;
+    if (dead.length) { // bring back one of their own destroyed plans
+      i = dead[Math.floor(Math.random() * dead.length)];
+    } else if (empty.length) { // never built (no auto-fill) or a "joined late" slot: a new auto plan
+      i = empty[0];
+      var used = p.slots.filter(function (s) { return s && s.card; }).map(function (s) { return s.card; });
+      var free = U.shuffle(C.PLAN_CARDS.filter(function (c) { return used.indexOf(c.id) < 0; }));
+      p.slots[i] = { card: free[0].id, auto: true, alive: false, lostTo: null };
+    } else return -1;
+    var s = p.slots[i];
+    s.alive = true; s.cracked = false; s.lostTo = null; s.rebuilt = true;
+    p.rebuilds = (p.rebuilds || 0) + 1;
+    return i;
+  }
+  /* v2 balance: chaos cards per round scale with the class: min(3, max(1, round(N / 10))), where N = ALL
+     players in the game (online or not), so a Wi-Fi blip doesn't change the rule mid-game.
+     1 card for 1–14 players, 2 for 15–24, 3 for 25+. */
+  function attackerCount(n) { if (n == null) n = players().length; return Math.min(3, Math.max(1, Math.round(n / 10))); }
+  /* N2: a NEW player who joins once planning is over (the "planning is over" screen or any chaos phase)
+     gets the class median of plans left (rounded down), but never fewer than CFG.lateJoinMin (3) and never
+     more than a full weekend (6). Lobby / Phase 1 joiners build their own plans (no auto-fill). Reconnecting players never
+     come through here (onHello finds them by pid or name), so they keep their own plans. */
+  // "late" = planning is over: the "planning is over" screen (they can't build any more) or any chaos phase
+  function chaosStarted() { return ['ready', 'round', 'reveal', 'sab_pick', 'sab_result'].indexOf(S.phase) >= 0 || (S.phase === 'final' && S.roundIdx >= 0); }
+  function lateStartPlans() {
+    var counts = players().map(aliveCount).sort(function (a, b) { return a - b; }), n = counts.length;
+    if (!n) return CFG.slots;
+    var median = n % 2 ? counts[(n - 1) / 2] : (counts[n / 2 - 1] + counts[n / 2]) / 2;
+    return Math.max(Math.min(CFG.lateJoinMin || 3, CFG.slots), Math.min(CFG.slots, Math.floor(median)));
+  }
   function addPlayer(pid, name, avatar) {
+    var late = chaosStarted(), startPlans = late ? lateStartPlans() : CFG.slots; // measured BEFORE this player is added
     var p = {
       pid: pid || U.rid(12), name: name, avatar: avatar, joinedAt: now(), lastSeen: now(), score: 0,
-      slots: [null, null, null, null, null, null],
+      slots: [null, null, null, null, null, null], rebuilds: 0,
       stats: { right: 0, wrong: 0, late: 0, tense: {} }
     };
     S.players[p.pid] = p; S.order.push(p.pid);
-    if (['ready', 'round', 'reveal', 'sab_pick', 'sab_result', 'final'].indexOf(S.phase) >= 0) autoFill(p);
+    if (late) {
+      // the missing plans are greyed "joined late" slots at the end of Sunday; autoFill then fills the first startPlans slots
+      for (var i = startPlans; i < CFG.slots; i++) p.slots[i] = { card: null, auto: true, alive: false, lostTo: '⏳', late: true };
+      p.lateStart = startPlans;
+      if (peerReady) U.toast('⏳ ' + name + ' joined late → starts with ' + startPlans + (startPlans === 1 ? ' plan' : ' plans') + ' (class middle)', 4000);
+    }
+    if (late) autoFill(p); // v2: nobody else is auto-filled — students start the chaos with the plans they built
     if (S.phase === 'round' && S.round) { S.round.participants[p.pid] = true; S.round.seen[p.pid] = true; }
     SND.play('join');
     return p;
@@ -230,8 +292,9 @@
     p.score += 50;
     save(); sendView(p.pid); renderLive();
   }
+  /* v2: NO auto-fill when planning ends. Each student starts the chaos rounds with exactly the plans they
+     built (0 is possible: they keep playing and can earn plans back with the comeback rule). */
   function endBuild() {
-    players().forEach(autoFill);
     S.phase = 'ready'; SND.play('pop'); commit();
   }
 
@@ -254,8 +317,10 @@
     var item = C.get(R.sid), t = now(), late = t > R.endsAt + 1500;
     var ok = !late && C.check(item, m.tiles);
     var left = Math.max(0, R.endsAt - t), total = S.settings.roundSecs * 1000;
-    var a = { ok: ok, late: late, ms: t - R.startedAt, pts: ok ? 100 + Math.round(100 * left / total) : 0, lost: -1, fx: ++S.fx };
-    if (!ok) a.lost = destroy(p, item.emoji);
+    var a = { ok: ok, late: late, ms: t - R.startedAt, pts: ok ? 100 + Math.round(100 * left / total) : 0, lost: -1, cracked: -1, rebuilt: -1, fx: ++S.fx };
+    if (ok) a.rebuilt = comeback(p);                                            // 🔨 on 0–1 plans
+    else if (late) { var ck = crack(p, item.emoji); a.lost = ck.lost; a.cracked = ck.cracked; } // ⏰ half a plan
+    else a.lost = destroy(p, item.emoji);                                       // ❌ a full plan
     p.score += a.pts; stat(p, C.tenseOf(item), ok, late);
     R.answers[p.pid] = a; R.participants[p.pid] = true;
     save(); sendView(p.pid); renderLive();
@@ -282,11 +347,12 @@
     players().forEach(function (p) {
       if (R.answers[p.pid] || !R.participants[p.pid]) return;
       if (R.seen[p.pid]) {
-        var a = { ok: false, late: true, none: true, pts: 0, lost: destroy(p, item.emoji), fx: ++S.fx, ms: 0 };
+        var ck = crack(p, item.emoji); // no answer = too slow = half a plan
+        var a = { ok: false, late: true, none: true, pts: 0, lost: ck.lost, cracked: ck.cracked, rebuilt: -1, fx: ++S.fx, ms: 0 };
         stat(p, C.tenseOf(item), false, true);
         R.answers[p.pid] = a;
       } else {
-        R.answers[p.pid] = { absent: true, ok: false, pts: 0, lost: -1, fx: ++S.fx };
+        R.answers[p.pid] = { absent: true, ok: false, pts: 0, lost: -1, cracked: -1, rebuilt: -1, fx: ++S.fx };
       }
     });
     S.phase = 'reveal';
@@ -300,9 +366,11 @@
   }
 
   /* ---------------- phase: sabotage (chaos cards) ---------------- */
-  /* Chaos cards come after EVERY round: the (up to) 3 fastest correct players attack.
-     Skipped when nobody was correct or nobody is left to hit. */
-  function sabAttackers() { return fastest(S.round, 3).filter(function (pid) { return P(pid) && isOnline(P(pid)); }); }
+  /* Chaos cards come after EVERY round: the attackerCount() fastest correct players who are still online attack
+     (1 for up to 14 players, 2 for 15–24, 3 for 25+). Skipped when nobody was correct or nobody is left to hit. */
+  function sabAttackers() {
+    return fastest(S.round, 99).filter(function (pid) { return P(pid) && isOnline(P(pid)); }).slice(0, attackerCount());
+  }
   function sabDue() {
     if (S.phase !== 'reveal' || (S.sab && S.sab.afterRound === S.roundIdx)) return false;
     var att = sabAttackers();
@@ -360,7 +428,6 @@
   /* ---------------- final ---------------- */
   function finish() {
     if (S.phase === 'round') endRound();
-    if (S.phase === 'build') players().forEach(autoFill);
     S.phase = 'final'; SND.play('fanfare'); commit();
     setTimeout(function () { U.confetti(180); }, 300);
   }
@@ -370,7 +437,7 @@
     var fx = S.fx;
     S = newState(code); S.settings = settings; S.fx = fx; // keep fx ids unique so phones still animate
     keep.forEach(function (p) {
-      p.score = 0; p.slots = [null, null, null, null, null, null]; p.stats = { right: 0, wrong: 0, late: 0, tense: {} };
+      p.score = 0; p.slots = [null, null, null, null, null, null]; p.stats = { right: 0, wrong: 0, late: 0, tense: {} }; delete p.lateStart; p.rebuilds = 0;
       S.players[p.pid] = p; S.order.push(p.pid);
     });
     commit();
@@ -403,13 +470,14 @@
   function fb(a, item) {
     if (!a) return null;
     return { ok: a.ok, late: !!a.late, none: !!a.none, absent: !!a.absent, pts: a.pts, lost: a.lost, fx: a.fx,
-      answer: C.answerOf(item), why: item.why, tense: C.tenseOf(item) };
+      cracked: a.cracked == null ? -1 : a.cracked, rebuilt: a.rebuilt == null ? -1 : a.rebuilt, rebuilds: 0,
+      answer: C.answerOf(item), why: item.why, tense: C.tenseOf(item), clue: C.USES[item.use].clue };
   }
   function mini(p) { return { pid: p.pid, name: p.name, avatar: p.avatar, alive: aliveCount(p) }; }
   function viewFor(p) {
     var t = now();
-    var v = { t: 'view', phase: S.phase, code: S.code, hints: S.settings.hints, roundNum: S.roundIdx + 1, total: S.roundList.length,
-      you: { pid: p.pid, name: p.name, avatar: p.avatar, score: p.score, slots: p.slots, alive: aliveCount(p) } };
+    var v = { t: 'view', phase: S.phase, maxRebuilds: CFG.maxRebuilds == null ? 2 : CFG.maxRebuilds, code: S.code, hints: S.settings.hints, roundNum: S.roundIdx + 1, total: S.roundList.length,
+      you: { pid: p.pid, name: p.name, avatar: p.avatar, score: p.score, slots: p.slots, alive: aliveCount(p), cracked: crackedCount(p), rebuilds: p.rebuilds || 0, lateStart: p.lateStart || 0 } };
     var item;
     if (S.phase === 'build') { v.endsIn = S.buildEndsAt - t; v.dur = S.settings.buildSecs * 1000; }
     if (S.phase === 'round' || S.phase === 'reveal') {
@@ -417,7 +485,8 @@
       v.q = qView(item, 'r' + S.round.idx);
       v.endsIn = S.round.endsAt - t; v.dur = S.settings.roundSecs * 1000;
       v.ans = fb(S.round.answers[p.pid], item);
-      if (S.phase === 'reveal') v.reveal = { answer: C.answerOf(item), why: item.why, tense: C.tenseOf(item) };
+      if (v.ans) v.ans.rebuilds = p.rebuilds || 0;
+      if (S.phase === 'reveal') v.reveal = { answer: C.answerOf(item), why: item.why, tense: C.tenseOf(item), clue: C.USES[item.use].clue };
     }
     if (S.phase === 'sab_pick' || S.phase === 'sab_result') {
       var B = S.sab;
@@ -467,12 +536,14 @@
   }
 
   function tenseRefHtml(includeWill) {
+    var I = function (use) { return C.USES[use].clue.split(' ')[0]; }; // the picture hint = first word of the clue badge (content.js USES)
     var cards = [
-      ['psimp', '🕒 Timetables', 'The movie <span class="verb-hl">starts</span> at 10:00.'],
-      ['pcont', '📅 Arrangements', 'I<span class="verb-hl">\'m meeting</span> Amy at 2:00.'],
-      ['going', '💭 Plans · 👀 Evidence', 'I<span class="verb-hl">\'m going to</span> visit Grandma.<br>It<span class="verb-hl">\'s going to</span> rain!']
+      ['psimp', I('timetable') + ' Timetables', 'The movie <span class="verb-hl">starts</span> at 10:00.'],
+      ['pcont', I('arrangement') + ' Arrangements', 'I<span class="verb-hl">\'m meeting</span> Amy at 2:00.'],
+      ['going', I('plan') + ' Plans · ' + I('evidence') + ' Evidence', 'I<span class="verb-hl">\'m going to</span> visit Grandma.<br>It<span class="verb-hl">\'s going to</span> rain!']
     ];
-    if (includeWill) cards.push(['will', '⚡ Decide now · 🙋 Offers · 🤞 Promises', 'I<span class="verb-hl">\'ll</span> help you!<br><span class="verb-hl">Shall</span> I carry it?']);
+    if (includeWill) cards.push(['will', I('instant') + ' Decide now · ' + I('offer') + ' Offers · ' + I('promise') + ' Promises · ' + I('guess') + ' Guesses',
+      'I<span class="verb-hl">\'ll</span> help you!<br><span class="verb-hl">Shall</span> I carry it?<br>I think we<span class="verb-hl">\'ll</span> win.']);
     return '<div class="tense-ref" style="grid-template-columns:repeat(' + cards.length + ',1fr)">' + cards.map(function (c) {
       return '<div class="card"><h3>' + c[1] + '</h3><p><span class="tense ' + c[0] + '">' + esc(C.TENSES[c[0]].name) + '</span></p><p>' + esc(C.TENSES[c[0]].form) + '</p><p>' + c[2] + '</p></div>';
     }).join('') + '</div>';
@@ -540,11 +611,13 @@
             '<div class="empty-lobby" id="emptyLobby"><span class="emo bob">📱</span>Waiting for players…</div>' +
             '<div style="margin-top:auto;display:flex;flex-direction:column;gap:1vw">' +
               '<div class="settings">' +
-                '<label>Chaos rounds <select id="setRounds">' + [4, 6, 8, 10, 12].map(function (n) { return '<option' + (n === S.settings.rounds ? ' selected' : '') + '>' + n + '</option>'; }).join('') + '</select></label>' +
                 '<label>Answer time <select id="setSecs">' + [15, 20, 30, 45].map(function (n) { return '<option value="' + n + '"' + (n === S.settings.roundSecs ? ' selected' : '') + '>' + n + 's</option>'; }).join('') + '</select></label>' +
                 '<label>Planning time <select id="setBuild">' + [60, 90, 120, 180, 240].map(function (n) { return '<option value="' + n + '"' + (n === S.settings.buildSecs ? ' selected' : '') + '>' + (n / 60) + ' min</option>'; }).join('') + '</select></label>' +
                 '<label><input type="checkbox" id="setHints"' + (S.settings.hints ? ' checked' : '') + '> Show clues</label>' +
                 '<span style="opacity:.8">Tip: click a name to remove it.</span>' +
+              '</div>' +
+              '<div class="round-picker" id="roundPicker" data-testid="round-picker" role="radiogroup" aria-label="Chaos rounds"><span class="rp-label">🌪️ Chaos rounds:</span>' +
+                roundOptions().map(function (n, k) { var on = n === S.settings.rounds; return '<button type="button" class="rp-btn' + (on ? ' on' : '') + '" role="radio" aria-checked="' + on + '" data-rounds="' + n + '" data-testid="rounds-' + n + '">' + (k ? n : n + ' rounds') + '</button>'; }).join('') +
               '</div>' +
               '<button class="btn btn-go btn-big pulse" id="btnStart" data-testid="host-start" style="font-size:2.2vw">▶ Start the game!</button>' +
             '</div>' +
@@ -557,13 +630,19 @@
           '<div class="chips h-chips-wrap" id="chips"></div>';
       case 'ready':
         return '<div class="center-col">' +
-          '<h1 class="mega zoom-bang">Weekends ready! 🎉</h1>' +
+          '<h1 class="mega zoom-bang" style="font-size:4.2vw">Planning is over! 🎉</h1>' +
           '<div class="card" style="font-size:2vw;text-align:left;max-width:70vw">' +
             '🌪️ <b>CHAOS</b> is coming! Build the right sentence in <b>' + S.settings.roundSecs + ' seconds</b>.<br>' +
             '✅ Right = your plans are <b>safe</b> 🛡️<br>' +
-            '❌ Wrong or too slow = 💥 a plan is <b>destroyed</b>!<br>' +
-            '⚡ After <b>every</b> round, the <b>3 fastest</b> right answers win <b>CHAOS CARDS</b> to throw at friends — they <b>always hit</b>! 🃏' +
-          '</div>' + tenseRefHtml(true) + '</div>';
+            '❌ Wrong = 💥 a plan is <b>destroyed</b>!<br>' +
+            '⏰ Too slow = 🩹 a plan is <b>cracked</b>. Two cracks = 💥 destroyed!<br>' +
+            '🔨 On 0 or 1 plans? A right answer <b>rebuilds</b> a plan (max ' + (CFG.maxRebuilds == null ? 2 : CFG.maxRebuilds) + ' times)!<br>' +
+            (attackerCount() === 1 ?
+              '⚡ After <b>every</b> round, the <b>fastest</b> right answer wins a <b>CHAOS CARD</b> to throw at a friend — it <b>always hits</b>! 🃏' :
+              '⚡ After <b>every</b> round, the <b>' + attackerCount() + ' fastest</b> right answers win <b>CHAOS CARDS</b> to throw at friends — they <b>always hit</b>! 🃏') +
+          '</div>' +
+          '<div class="answered-count" id="readyCount" data-testid="ready-count"></div>' +
+          '<div class="chips small h-chips-wrap" id="chips" data-testid="chips"></div>' + tenseRefHtml(true) + '</div>';
       case 'round':
         item = C.get(S.round.sid);
         return '<div class="phase-head">' + roundLabel() + '<div class="answered-count" id="answeredCount" data-testid="answered-count"></div>' + timerHtml() + '</div>' +
@@ -572,8 +651,8 @@
             '<div>' +
               '<h1 class="chaos-title slide-up" data-testid="chaos-title">' + esc(item.title) + '</h1>' +
               '<p class="chaos-text">' + esc(item.text) + '</p>' +
-              '<div class="card chaos-cue">💬 ' + esc(item.cue) + '</div>' +
-              (S.settings.hints ? '<p style="font-size:1.8vw;margin-top:1vw"><span class="clue">' + esc(C.USES[item.use].clue) + '</span></p>' : '') +
+              '<div class="card chaos-cue" data-testid="chaos-cue">👉 ' + esc(item.cue) + '</div>' +
+              (S.settings.hints ? '<p style="font-size:1.8vw;margin-top:1vw"><span class="clue" data-testid="chaos-clue">' + esc(C.USES[item.use].clue) + '</span></p>' : '') +
             '</div>' +
           '</div>' +
           '<div class="chips small h-chips-wrap" id="chips"></div>';
@@ -583,20 +662,23 @@
         var nR = keys.filter(function (k) { return R.answers[k].ok; }).length;
         var nW = keys.filter(function (k) { return !R.answers[k].ok && !R.answers[k].late && !R.answers[k].absent; }).length;
         var nL = keys.filter(function (k) { return R.answers[k].late && !R.answers[k].absent; }).length;
-        var f = fastest(R, 3);
+        var nC = keys.filter(function (k) { return R.answers[k].cracked >= 0; }).length;
+        var f = fastest(R, attackerCount());
+        var cb = keys.filter(function (k) { return R.answers[k].rebuilt >= 0 && P(k); });
         var tense = C.tenseOf(item);
         return '<div class="phase-head">' + roundLabel() + '<h1 style="font-size:2.6vw">' + item.emoji + ' ' + esc(item.title) + '</h1></div>' +
           '<div class="center-col" style="flex:0 0 auto">' +
             '<div class="card answer-reveal zoom-bang" data-testid="reveal-answer">' + hlSentence(C.answerOf(item)) + '</div>' +
-            '<div style="font-size:2vw"><span class="tense ' + tense + '">' + esc(C.TENSES[tense].name) + '</span></div>' +
+            '<div style="font-size:2vw"><span class="clue" data-testid="reveal-clue">' + esc(C.USES[item.use].clue) + '</span> ➜ <span class="tense ' + tense + '">' + esc(C.TENSES[tense].name) + '</span></div>' +
             '<div class="reveal-why">💡 ' + esc(item.why) + '</div>' +
-            '<div class="stats"><div class="card">✅ ' + nR + ' right</div><div class="card">❌ ' + nW + ' wrong</div><div class="card">⏰ ' + nL + ' too slow</div>' +
+            '<div class="stats"><div class="card">✅ ' + nR + ' right</div><div class="card">❌ ' + nW + ' wrong</div><div class="card" data-testid="reveal-slow">⏰ ' + nL + ' too slow' + (nC ? ' (🩹 ' + nC + ' cracked)' : '') + '</div>' +
               (f.length ? '<div class="card">⚡ Fastest: ' + f.map(function (k) { return esc(P(k).avatar + ' ' + P(k).name) + ' (' + (R.answers[k].ms / 1000).toFixed(1) + 's)'; }).join(', ') + '</div>' : '') +
+              (cb.length ? '<div class="card" data-testid="reveal-comeback">🔨 Comeback: ' + cb.map(function (k) { return esc(P(k).avatar + ' ' + P(k).name); }).join(', ') + '</div>' : '') +
             '</div>' +
           '</div>' +
           '<div class="chips small h-chips-wrap" id="chips"></div>';
       case 'sab_pick':
-        return '<div class="phase-head"><h1>⚡ CHAOS CARDS!</h1><div class="sub">The fastest players throw chaos at a friend!<br>Each player can only be hit <b>once</b>.</div>' + timerHtml() + '</div>' +
+        return '<div class="phase-head"><h1>⚡ CHAOS CARDS!</h1><div class="sub">' + (B.attackers.length === 1 ? 'The fastest player throws' : 'The ' + B.attackers.length + ' fastest players throw') + ' chaos at a friend!<br>Each player can only be hit <b>once</b>.</div>' + timerHtml() + '</div>' +
           '<div class="center-col"><div class="mega wobble" style="font-size:10vw">🃏</div>' +
           '<div class="attack-list" id="attackList"></div>' +
           '<p class="chaos-text">Attackers: choose a victim on your phone! 😈</p></div>';
@@ -641,7 +723,12 @@
     if (S.phase === 'lobby') {
       $('#qr').innerHTML = qrSvg(joinUrl());
       $('#btnStart').addEventListener('click', next);
-      $('#setRounds').addEventListener('change', function (e) { S.settings.rounds = +e.target.value; save(); });
+      $('#roundPicker').addEventListener('click', function (e) {
+        var b = e.target.closest('.rp-btn'); if (!b) return;
+        S.settings.rounds = +b.getAttribute('data-rounds'); save();
+        [].forEach.call(document.querySelectorAll('#roundPicker .rp-btn'), function (x) { var on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', on); });
+        SND.play('pop');
+      });
       $('#setSecs').addEventListener('change', function (e) { S.settings.roundSecs = +e.target.value; save(); });
       $('#setBuild').addEventListener('change', function (e) { S.settings.buildSecs = +e.target.value; save(); });
       $('#setHints').addEventListener('change', function (e) { S.settings.hints = e.target.checked; save(); });
@@ -671,6 +758,10 @@
       if (S.phase === 'build') {
         var n = builtCount(p);
         inner += '<span class="bar"><i style="width:' + Math.round(100 * n / CFG.slots) + '%"></i></span><span class="plans">' + n + '/6</span>';
+      } else if (S.phase === 'ready') { // v2: how many plans each student built (no auto-fill)
+        var nb = aliveCount(p);
+        inner += '<span class="plans" data-built="' + nb + '">' + (nb ? '📅×' + nb : '0 plans') + '</span>';
+        if (!nb) cls += ' ruined';
       } else if (S.phase === 'round') {
         var a = S.round.answers[p.pid];
         if (a) { cls += ' answered'; inner += '<span class="badge">✅</span>'; }
@@ -679,7 +770,9 @@
         var b = S.round.answers[p.pid];
         if (b && b.ok) cls += ' right'; else if (b && !b.absent) cls += ' wrong';
         if (b && b.lost >= 0) inner += '<span class="badge">💥</span>';
-        inner += alive ? '<span class="plans">📅×' + alive + '</span>' : '<span class="plans">😱 Weekend ruined!</span>';
+        else if (b && b.cracked >= 0) inner += '<span class="badge">🩹</span>';
+        else if (b && b.rebuilt >= 0) inner += '<span class="badge">🔨</span>';
+        inner += alive ? '<span class="plans">📅×' + alive + (crackedCount(p) ? ' 🩹' : '') + '</span>' : '<span class="plans">😱 Weekend ruined!</span>';
         if (alive === 0) cls += ' ruined';
       }
       if (c.classList.contains('new')) cls += ' new';
@@ -714,6 +807,10 @@
     if ($('#buildCount')) {
       var done = players().filter(function (p) { return builtCount(p) >= CFG.slots; }).length;
       $('#buildCount').textContent = '🗓️ ' + done + ' / ' + n + ' weekends full';
+    }
+    if ($('#readyCount')) {
+      var zero = players().filter(function (p) { return !aliveCount(p); }).length;
+      $('#readyCount').textContent = '🗓️ Plans built: ' + players().reduce(function (t, p) { return t + aliveCount(p); }, 0) + (zero ? ' · ' + zero + ' with 0 plans (a right answer rebuilds one 🔨)' : '');
     }
     if ($('#answeredCount')) {
       var ans = S.phase === 'round' ? Object.keys(S.round.answers).length : 0;
@@ -777,7 +874,7 @@
         '<p>Room <b>' + esc(saved.code) + '</b> · ' + saved.order.length + ' players · ' + esc(saved.phase === 'lobby' ? 'in the lobby' : 'round ' + (saved.roundIdx + 1)) + '</p>' +
         '<p style="display:flex;gap:1vw;justify-content:center"><button class="btn btn-go" id="mResume">▶ Resume</button><button class="btn" id="mNew">✨ New game</button></p></div></div>');
       document.body.appendChild(m);
-      $('#mResume').addEventListener('click', function () { m.remove(); S = saved; start(true); });
+      $('#mResume').addEventListener('click', function () { m.remove(); S = saved; if (S.phase === 'lobby' && roundOptions().indexOf(S.settings.rounds) < 0) S.settings.rounds = CFG.defaults.rounds; start(true); });
       $('#mNew').addEventListener('click', function () { m.remove(); S = newState(makeCode()); start(false); });
     } else {
       S = newState(makeCode()); start(false);
@@ -791,6 +888,6 @@
   }
 
   // for automated tests / debugging in the console
-  window.__FTG_HOST = { get state() { return S; }, onlineCount: function () { return onlinePlayers().length; }, next: next, kick: kick, viewFor: function (pid) { return viewFor(P(pid)); } };
+  window.__FTG_HOST = { get state() { return S; }, onlineCount: function () { return onlinePlayers().length; }, attackerCount: attackerCount, next: next, kick: kick, viewFor: function (pid) { return viewFor(P(pid)); } };
   boot();
 })();

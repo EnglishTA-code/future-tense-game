@@ -368,3 +368,27 @@ body.host { height: 100vh; overflow: hidden; font-size: clamp(14px, 1.05vw, 22px
   .tile { min-height: 48px; padding: 8px 13px; font-size: 1.22rem; }
   .tile-bank { gap: 8px; }
 }
+
+/* ===== v2 (N2): plans a late joiner never had ("Joined late") — grey, dashed, no CANCELLED stamp ===== */
+.slot.filled.late { background: #dee2e6; border-style: dashed; box-shadow: none; color: #495057; }
+.slot.filled.late .emo { opacity: .75; }
+
+/* ===== v2 balance: cracked plan (timeout = half a plan) and comeback ===== */
+.slot.filled.cracked { border-color: #e8590c; border-style: dashed;
+  background-image: linear-gradient(118deg, transparent 46%, #e8590c 47%, #e8590c 49%, transparent 50%), linear-gradient(62deg, transparent 58%, #e8590c 59%, #e8590c 60.5%, transparent 61.5%); }
+.slot .crack-badge { position: absolute; top: -8px; right: -6px; font-size: 1.15rem; line-height: 1; filter: drop-shadow(0 1px 0 #fff); }
+.mini-planner .slot .crack-badge { top: -7px; right: -5px; font-size: 1rem; }
+.cracked-note { white-space: nowrap; }
+.feedback .crack-msg { font-size: 1.15rem; margin-top: 4px; }
+.feedback .comeback { font-size: 1.35rem; font-weight: 900; color: #2b8a3e; margin-top: 4px; }
+.feedback .fb-small { font-size: .95rem; opacity: .85; }
+/* v2: a slot that was never built (no auto-fill after planning) */
+.slot.filled.unbuilt { background: rgba(255,255,255,.35); border-style: dashed; box-shadow: none; color: #495057; }
+.slot.filled.unbuilt .emo { opacity: .6; }
+/* v2: big round picker on the host lobby (3 / 4 / 5 / 6, default 4) */
+.round-picker { display: flex; align-items: center; gap: .8vw; flex-wrap: wrap; background: rgba(255,255,255,.18); border-radius: 1.2vw; padding: .8vw 1vw; }
+.round-picker .rp-label { font-weight: 800; font-size: 1.7vw; color: #fff; margin-right: .4vw; }
+.round-picker .rp-btn { font: inherit; font-weight: 900; font-size: 1.9vw; min-width: 5.5vw; padding: .7vw 1.3vw; border-radius: 1vw; border: .3vw solid rgba(255,255,255,.7); background: rgba(255,255,255,.25); color: #fff; cursor: pointer; transition: transform .12s; }
+.round-picker .rp-btn:hover { transform: scale(1.06); }
+.round-picker .rp-btn.on { background: #ffd43b; color: #212529; border-color: #fff; box-shadow: 0 0 0 .35vw rgba(255,212,59,.55), 0 .4vw 0 rgba(0,0,0,.25); transform: scale(1.1); }
+.round-picker .rp-btn.on::before { content: '✔ '; }

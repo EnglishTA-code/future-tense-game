@@ -14,7 +14,10 @@
     codeAlphabet: 'ABCDEFGHJKLMNPQRSTUVWXYZ', // no I / O (look like 1 / 0)
     maxPlayers: 40,
     slots: 6,                          // Sat/Sun x morning/afternoon/evening
-    defaults: { rounds: 8, roundSecs: 20, buildSecs: 120, pickSecs: 15, hints: true },
+    maxRebuilds: 2,                    // comeback: a right answer on 0-1 plans rebuilds a plan, at most this many times per game
+    lateJoinMin: 3,                    // a NEW player joining after chaos round 1 has started gets the class median of plans left (rounded down), at least this many
+    roundOptions: [3, 4, 5, 6], // big round picker on the host lobby (teacher's choice; default 4)
+    defaults: { rounds: 4, roundSecs: 20, buildSecs: 120, pickSecs: 15, hints: true },
     peerDebug: 1                       // 0 = silent, 1 = errors, 2 = warnings, 3 = all
   };
 

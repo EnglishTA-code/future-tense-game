@@ -210,6 +210,10 @@
   /* ---------------- GAME RENDERING ---------------- */
   function onView(v) {
     view = v; viewAt = performance.now();
+    if (v.you && v.you.lateStart && session.lateNote !== v.you.pid) {
+      session.lateNote = v.you.pid; saveSession();
+      setTimeout(function () { U.toast('⏳ You joined late, so you start with ' + v.you.lateStart + (v.you.lateStart === 1 ? ' plan.' : ' plans.'), 5000); }, 300);
+    }
     if (typeof v.endsIn === 'number') deadline = viewAt + v.endsIn;
     else if (v.sab && typeof v.sab.endsIn === 'number') deadline = viewAt + v.sab.endsIn;
     render();
@@ -274,26 +278,42 @@
     var t = $('#ttext'); if (t) t.textContent = view.phase === 'build' ? '⏱️ ' + Math.floor(sec / 60) + ':' + ('0' + sec % 60).slice(-2) : '⏱️ ' + sec + 's';
   }, 200);
 
+  function I(use) { return C.USES[use].clue.split(' ')[0]; } // the picture hint of a use = first word of its clue badge (content.js USES)
   function renderLobby(box, v) {
     box.innerHTML = '<div class="big-msg" style="margin-top:6vh"><div class="emo bob">' + v.you.avatar + '</div>' +
       '<h2 data-testid="lobby-welcome">You\'re in, ' + esc(v.you.name) + '! 🎉</h2>' +
       '<p>Can you see your name on the big screen? 👀</p><p>Wait for your teacher to start…</p></div>' +
-      '<div class="card" style="font-size:1.05rem"><b>Quick reminder 🧠</b><br>🕒 Timetable → <b>The bus leaves at 9:00.</b><br>📅 Arrangement → <b>I\'m meeting Amy.</b><br>💭 Plan / 👀 evidence → <b>I\'m going to…</b><br>⚡ Decide now / offer / promise → <b>I\'ll…</b></div>';
+      '<div class="card" style="font-size:1.05rem" data-testid="lobby-reminder"><b>Quick reminder 🧠</b><br>' +
+        I('timetable') + ' Timetable → <b>The bus leaves at 9:00.</b><br>' +
+        I('arrangement') + ' Arranged with people → <b>I\'m meeting Amy.</b><br>' +
+        I('plan') + ' Plan / ' + I('evidence') + ' evidence → <b>I\'m going to…</b><br>' +
+        I('instant') + ' Decide now / ' + I('offer') + ' offer / ' + I('promise') + ' promise / ' + I('guess') + ' guess → <b>I\'ll…</b></div>';
     SND.play('join');
   }
 
   /* ----- planner ----- */
   function slotHtml(s, i, opts) {
     var info = U.SLOTS[i];
-    if (!s) return '<button type="button" class="slot" data-slot="' + i + '" data-testid="slot-' + i + '"><span class="plus">＋</span><span class="when">' + info.icon + ' ' + info.part + '</span></button>';
+    opts = opts || {};
+    if (opts.locked == null) opts = Object.assign({}, opts, { locked: !!(view && view.phase !== 'build') });
+    if (!s && !(opts && opts.locked)) return '<button type="button" class="slot" data-slot="' + i + '" data-testid="slot-' + i + '"><span class="plus">＋</span><span class="when">' + info.icon + ' ' + info.part + '</span></button>';
+    if (!s && opts && opts.locked) { // v2: planning is over and this slot was never built (no auto-fill)
+      return '<div class="slot filled unbuilt" data-slot="' + i + '" data-testid="slot-' + i + '"><span class="emo">❔</span>' +
+        '<span class="when">' + info.icon + ' ' + info.part + '</span><span class="sent">No plan</span></div>';
+    }
+    if (s.late) { // N2: joined after the chaos started -> this plan was never there
+      return '<div class="slot filled late" data-slot="' + i + '" data-testid="slot-' + i + '"><span class="emo">⏳</span>' +
+        '<span class="when">' + info.icon + ' ' + info.part + '</span><span class="sent">Joined late</span></div>';
+    }
     var card = C.get(s.card);
     var dying = opts && opts.dying === i;
-    var cls = 'slot filled' + (s.auto ? ' auto' : '') + (!s.alive && !dying ? ' dead' : '') + (dying ? ' dying' : '');
+    var cls = 'slot filled' + (s.auto ? ' auto' : '') + (!s.alive && !dying ? ' dead' : '') + (dying ? ' dying' : '') + (s.alive && s.cracked ? ' cracked' : '');
     return '<div class="' + cls + '" data-slot="' + i + '" data-testid="slot-' + i + '">' +
       '<span class="emo">' + (s.alive || dying ? card.emoji : (s.lostTo || '💥')) + '</span>' +
       '<span class="when">' + info.icon + ' ' + info.part + '</span>' +
       '<span class="sent">' + esc(s.auto ? card.label + ' (auto)' : C.answerOf(card)) + '</span>' +
       (dying ? '<span class="boom">' + esc(s.lostTo || '💥') + '</span>' : '') +
+      (s.alive && s.cracked ? '<span class="crack-badge" title="Cracked: one more crack and you lose it">🩹</span>' : '') +
     '</div>';
   }
   function plannerHtml(slots, opts) {
@@ -304,9 +324,12 @@
     return '<div class="mini-planner" id="mini" data-testid="mini-planner">' + slots.map(function (s, i) { return slotHtml(s, i, opts); }).join('') + '</div>';
   }
   function aliveOf(slots) { return slots.filter(function (s) { return s && s.alive; }).length; }
+  function crackedOf(slots) { return slots.filter(function (s) { return s && s.alive && s.cracked; }).length; }
   function plansLeftHtml(v) {
-    var n = aliveOf(v.you.slots);
-    return '<div class="plans-left" data-testid="plans-left" data-alive="' + n + '">' + (n ? '📅 Plans left: <b>' + n + ' / 6</b>' : '<span class="ruined">😱 Weekend ruined!</span> Keep playing — you can still win chaos cards!') + '</div>';
+    var n = aliveOf(v.you.slots), c = crackedOf(v.you.slots);
+    return '<div class="plans-left" data-testid="plans-left" data-alive="' + n + '" data-cracked="' + c + '">' +
+      (n ? '📅 Plans left: <b>' + n + ' / 6</b>' + (c ? ' · <span class="cracked-note">🩹 1 cracked</span>' : '') :
+        '<span class="ruined">😱 Weekend ruined!</span> Keep playing — ' + ((v.you.rebuilds || 0) < (v.maxRebuilds || 2) ? 'a right answer rebuilds a plan! 🔨' : 'you can still win chaos cards!')) + '</div>';
   }
 
   function renderBuild(box, v) {
@@ -365,7 +388,7 @@
     var tries = 0;
     var m = openModal('<div class="q-card"><div class="q-emo">' + card.emoji + '</div><div class="q-title">' + esc(card.label) + '</div>' +
       '<div class="q-clue"><span class="clue">' + esc(C.USES[card.use].clue) + '</span></div>' +
-      '<div class="q-cue">💬 ' + esc(card.cue) + '</div></div>' +
+      '<div class="q-cue">👉 ' + esc(card.cue) + '</div></div>' +
       '<div id="mHint"></div><div id="mBuilder" data-card="' + card.id + '"></div>' +
       '<div style="margin-top:10px"><button type="button" class="btn" id="mBack" style="width:100%">⬅ Back</button></div>');
     $('#mBack', m).addEventListener('click', function () { openCardChooser(slot); });
@@ -384,22 +407,28 @@
           tries++;
           SND.play('bad'); tb.shake();
           setTimeout(function () { tb.reset(); }, 450);
-          $('#mHint', m).innerHTML = '<div class="hint-box" data-testid="build-hint">💡 ' + esc(C.PLAN_WHY[card.use]) +
+          $('#mHint', m).innerHTML = '<div class="hint-box" data-testid="build-hint">💡 ' + esc(I(card.use) + ' ' + C.PLAN_WHY[card.use]) +
             (tries >= 2 ? '<br>✍️ Build: <b>' + esc(C.answerOf(card)) + '</b>' : '') + '</div>';
         }
       }
     });
   }
 
+  function builtMsg(n) {
+    if (!n) return 'You built 0 plans — answer correctly to rebuild! 🔨';
+    if (n === 1) return 'You built 1 plan! 💪 Answer correctly to rebuild more! 🔨';
+    return 'You built ' + n + ' plans! ' + (n === 6 ? '🎉' : '👍');
+  }
   function renderReady(box, v) {
-    box.innerHTML = '<div class="big-msg"><div class="emo bob">🌪️</div><h2>Your weekend is ready!</h2><p>Now… survive the CHAOS! 😱</p></div>' + plannerHtml(v.you.slots);
+    var n = aliveOf(v.you.slots);
+    box.innerHTML = '<div class="big-msg"><div class="emo bob">' + (n ? '🌪️' : '🔨') + '</div><h2 data-testid="built-count" data-built="' + n + '">' + esc(builtMsg(n)) + '</h2><p>Now… survive the CHAOS! 😱</p></div>' + plannerHtml(v.you.slots);
   }
 
   /* ----- question card + builder ----- */
   function qCardHtml(q, hints) {
     return '<div class="card q-card"><div class="q-emo"><span class="zoom-bang" style="display:inline-block">' + q.emoji + '</span></div>' +
       '<div class="q-title" data-testid="q-title">' + esc(q.title) + '</div><div class="q-text">' + esc(q.text) + '</div>' +
-      '<div class="q-cue">💬 ' + esc(q.cue) + '</div>' + (hints ? '<div class="q-clue"><span class="clue">' + esc(q.clue) + '</span></div>' : '') +
+      '<div class="q-cue" data-testid="q-cue">👉 ' + esc(q.cue) + '</div>' + (hints ? '<div class="q-clue"><span class="clue" data-testid="q-clue">' + esc(q.clue) + '</span></div>' : '') +
       '<div id="qBuilder" data-qid="' + q.id + '" data-qkey="' + q.key + '"></div></div>';
   }
   function mountBuilder(q) {
@@ -425,14 +454,18 @@
     else { emo = '❌'; head = 'Oops!'; cls = 'bad'; }
     var sub = '';
     if (a.ok && a.pts) sub = '<div class="fb-pts">+' + a.pts + ' points</div>';
-    if (a.ok) sub += '<div>Your plans are safe 😎</div>';
-    if (a.lost >= 0) sub += '<div>💥 You lost a plan!</div>';
+    if (a.ok && a.rebuilt >= 0) sub += '<div class="comeback pop-in" data-testid="comeback">🔨 Comeback! You rebuilt a plan</div>' +
+      '<div class="fb-small">(' + (a.rebuilds || 1) + ' of ' + (v.maxRebuilds || 2) + ' rebuilds used)</div>';
+    else if (a.ok) sub += '<div>Your plans are safe 😎</div>';
+    if (a.late && a.cracked >= 0) sub += '<div class="crack-msg" data-testid="cracked">🩹 Your plan is cracked — one more crack and you lose it!</div>';
+    else if (a.late && a.lost >= 0) sub += '<div class="crack-msg" data-testid="crack-lost">💥 Second crack — you lost a plan!</div>';
+    else if (a.lost >= 0) sub += '<div>💥 You lost a plan!</div>';
     else if (!a.ok && !a.absent && aliveOf(v.you.slots) === 0) sub += '<div>Your weekend is already ruined 😱</div>';
     return '<div class="card feedback ' + cls + ' slide-up" data-testid="feedback" data-ok="' + (a.ok ? 1 : 0) + '">' +
       '<div class="fb-emo pop-in">' + emo + '</div><div class="fb-head">' + head + '</div>' + sub +
       '<div class="fb-ans">' + esc(a.answer) + '</div>' +
       '<div class="fb-why" data-testid="feedback-why">💡 ' + esc(a.why) + '</div>' +
-      '<div style="margin-top:8px"><span class="tense ' + tense + '">' + esc(T.name) + '</span></div></div>';
+      '<div style="margin-top:8px">' + (a.clue ? '<span class="clue" data-testid="feedback-clue">' + esc(a.clue) + '</span> ➜ ' : '') + '<span class="tense ' + tense + '">' + esc(T.name) + '</span></div></div>';
   }
   function animateLoss(a, v) {
     if (!a || a.lost < 0 || animatedFx[a.fx]) return null;
@@ -454,12 +487,19 @@
       mountBuilder(q);
       return;
     }
-    if (!a) a = { absent: true, answer: v.reveal.answer, why: v.reveal.why, tense: v.reveal.tense, lost: -1 };
+    if (!a) a = { absent: true, answer: v.reveal.answer, why: v.reveal.why, tense: v.reveal.tense, clue: v.reveal.clue, lost: -1 };
     window.scrollTo(0, 0); // the student was scrolled down to the Send button
     if (a.ok) SND.play('good'); else if (!a.absent) SND.play('bad');
     var dying = animateLoss(a, v);
     box.innerHTML = label + feedbackHtml(a, v) + miniHtml(v.you.slots, { dying: dying }) + plansLeftHtml(v) +
       '<div class="big-msg" style="padding:0"><p>' + (v.phase === 'reveal' ? '👀 Look at the big screen!' : '⏳ Wait for the others…') + '</p></div>';
+    // v2: show a fresh crack (shake) or a rebuilt plan (pop) once
+    var fresh = a.cracked >= 0 ? ['c', a.cracked, 'shake'] : a.rebuilt >= 0 ? ['r', a.rebuilt, 'pop-in'] : null;
+    if (fresh && a.fx != null && !animatedFx[fresh[0] + a.fx]) {
+      animatedFx[fresh[0] + a.fx] = true;
+      var fs = $('#mini [data-slot="' + fresh[1] + '"]'); if (fs) fs.classList.add(fresh[2]);
+      if (fresh[0] === 'c' && navigator.vibrate) navigator.vibrate(60);
+    }
   }
 
   function renderPick(box, v) {
@@ -467,11 +507,11 @@
     var names = S.attackers.map(function (x) { return x.avatar + ' ' + esc(x.name); }).join(', ');
     if (S.amAttacker && !S.myPick) {
       var any = S.targets.some(function (t) { return !t.taken && !t.ruined; });
-      box.innerHTML = timerHtml() + '<div class="big-msg" style="padding:4px"><div class="emo wobble" style="font-size:4rem">🃏</div><h2 style="font-size:1.6rem">You\'re one of the fastest! ⚡</h2><p>Throw a CHAOS CARD at…</p></div>' +
+      box.innerHTML = timerHtml() + '<div class="big-msg" style="padding:4px"><div class="emo wobble" style="font-size:4rem">🃏</div><h2 style="font-size:1.6rem">' + (S.attackers.length === 1 ? 'You\'re the fastest! ⚡' : 'You\'re one of the fastest! ⚡') + '</h2><p>Throw a CHAOS CARD at…</p></div>' +
         '<div class="target-grid" data-testid="target-grid">' + S.targets.map(function (t) {
           var dis = t.taken || t.ruined;
           return '<button type="button" data-target="' + t.pid + '" data-testid="target"' + (dis ? ' disabled class="taken"' : '') + '><span class="av">' + t.avatar + '</span><span class="nm">' + esc(t.name) + '</span>' +
-            '<span class="pl">' + (t.taken ? '🎯 Already hit by ' + esc(t.takenBy || '?') : t.ruined ? '😱 Weekend ruined!' : '📅 ' + t.alive + ' plans') + '</span></button>';
+            '<span class="pl">' + (t.taken ? '🎯 Already hit by ' + esc(t.takenBy || '?') : t.ruined ? '😱 Weekend ruined!' : '📅 ' + t.alive + (t.alive === 1 ? ' plan' : ' plans')) + '</span></button>';
         }).join('') + '</div>' + (any ? '' : '<p class="big-msg">Nobody left to hit! 🤷</p>');
       U.$all('[data-target]:not([disabled])', box).forEach(function (b) {
         b.addEventListener('click', function () {
