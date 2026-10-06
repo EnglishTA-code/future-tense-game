@@ -9,7 +9,7 @@
   var esc = U.esc, $ = U.$;
   var SAVE_KEY = 'ftg-host-v1';
   var setup = CFG.peerSetup();
-  var peer = null, peerReady = false, conns = {}, S = null;
+  var peer = null, peerReady = false, peerOpenAt = 0, conns = {}, S = null;
   var stageKey = '', saveTimer = null, lastTickSec = -1, pendingTimers = {};
 
   /* ---------------- state ---------------- */
@@ -108,7 +108,7 @@
     peer = p;
     p.on('open', function () {
       if (p !== peer) return;
-      peerReady = true; stageKey = ''; render();
+      peerReady = true; peerOpenAt = now(); stageKey = ''; render();
     });
     p.on('connection', onConnection);
     p.on('disconnected', function () {
@@ -177,7 +177,7 @@
     return players().filter(function (p) { return p.name.toLowerCase() === n; })[0];
   }
   function onHello(conn, m) {
-    var name = String(m.name || '').replace(/\s+/g, ' ').trim().slice(0, 12);
+    var name = Array.from(String(m.name || '').replace(/\s+/g, ' ').trim()).slice(0, 12).join('');
     var avatar = U.AVATARS.indexOf(m.avatar) >= 0 ? m.avatar : U.AVATARS[0];
     var p = m.pid && P(m.pid);
     if (!p) {
@@ -195,7 +195,11 @@
       }
     }
     var old = conns[p.pid];
-    if (old && old !== conn) { old._pid = null; try { old.close(); } catch (e) { /* */ } }
+    if (old && old !== conn) {
+      // same player connected from a second tab/window: tell the old one to stop (otherwise the two tabs keep kicking each other off)
+      old._pid = null; send(old, { t: 'replaced' });
+      setTimeout(function () { try { old.close(); } catch (e) { /* */ } }, 300);
+    }
     conn._pid = p.pid; conns[p.pid] = conn; p.lastSeen = now();
     if (S.round && S.phase === 'round') S.round.seen[p.pid] = true;
     send(conn, { t: 'welcome', pid: p.pid, name: p.name, avatar: p.avatar, code: S.code });
@@ -258,6 +262,8 @@
     checkAllAnswered();
   }
   function checkAllAnswered() {
+    // after a host refresh the phones need a few seconds to reconnect: "nobody online" must not end the round early
+    if (!peerReady || now() - peerOpenAt < 8000) return;
     if (S.phase === 'round') {
       var R = S.round;
       var waiting = players().filter(function (p) { return R.participants[p.pid] && !R.answers[p.pid] && isOnline(p); });
@@ -608,7 +614,7 @@
         var pod = function (p, n) {
           if (!p) return '<div class="pod p' + n + '"></div>';
           return '<div class="pod p' + n + '" data-testid="podium-' + n + '"><div class="av">' + p.avatar + '</div><div class="nm">' + esc(p.name) + '</div>' +
-            '<div class="info">📅 ' + aliveCount(p) + ' plans · ⭐ ' + p.score + '</div><div class="stand">' + n + '</div></div>';
+            '<div class="info">📅 ' + aliveCount(p) + (aliveCount(p) === 1 ? ' plan' : ' plans') + ' · ⭐ ' + p.score + '</div><div class="stand">' + n + '</div></div>';
         };
         var tot = { will: [0, 0], going: [0, 0], pcont: [0, 0], psimp: [0, 0] };
         players().forEach(function (p) { Object.keys(p.stats.tense).forEach(function (t) { tot[t][0] += p.stats.tense[t].right; tot[t][1] += p.stats.tense[t].total; }); });
@@ -692,7 +698,8 @@
       if (!pa) return '';
       var res = t && B.hits && B.hits[t.pid] ? 'hit' : null;
       return '<div class="attack ' + (res || '') + '"><span class="av">' + pa.avatar + '</span>' + esc(pa.name) + ' <span style="font-size:2.6vw">➜🌪️➜</span> ' +
-        (t ? '<span class="av">' + t.avatar + '</span>' + esc(t.name) + (res === 'hit' ? ' 💥 HIT' + (B.hits[t.pid].lost < 0 ? '' : ' (−1 plan)') : '') : '<span class="pulse" style="display:inline-block">🤔 choosing…</span>') +
+        (t ? '<span class="av">' + t.avatar + '</span>' + esc(t.name) + (res === 'hit' ? ' 💥 HIT' + (B.hits[t.pid].lost < 0 ? '' : ' (−1 plan)') : '') :
+          (S.phase === 'sab_result' || !validTargets(a).length ? '🤷 nobody left to hit' : '<span class="pulse" style="display:inline-block">🤔 choosing…</span>')) +
         '</div>';
     }).join('');
   }

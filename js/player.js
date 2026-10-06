@@ -130,6 +130,9 @@
         session.joined = false; session.pid = null; saveSession();
         showJoin('You were removed by the teacher. You can join again with a different name.', 'name');
         break;
+      case 'replaced': // this player was opened in another tab / window -> stop here instead of fighting over the connection
+        wantConnected = false; disconnect(); showReplaced();
+        break;
       case 'rejoin':
         send({ t: 'hello', pid: session.pid, name: session.name, avatar: session.avatar });
         break;
@@ -174,7 +177,7 @@
     $('#joinForm').addEventListener('submit', function (e) {
       e.preventDefault();
       var c = $('#inCode').value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-      var n = $('#inName').value.replace(/\s+/g, ' ').trim().slice(0, 12);
+      var n = Array.from($('#inName').value.replace(/\s+/g, ' ').trim()).slice(0, 12).join('');
       if (c.length !== CFG.codeLength) { U.toast('Type the ' + CFG.codeLength + '-letter code from the big screen.'); return; }
       if (!n) { U.toast('Type your name!'); $('#inName').focus(); return; }
       if (session.code !== c) { session.pid = null; joinedOnce = false; }
@@ -194,6 +197,14 @@
     app.innerHTML = '<div class="big-msg" style="margin-top:20vh"><div class="emo bob">' + esc(session.avatar || '📱') + '</div><h2>Joining room ' + esc(session.code) + '…</h2>' +
       '<p>Hi ' + esc(session.name) + '! 👋</p><p><button class="btn" id="notMe">Not you? Change</button></p></div>';
     $('#notMe').addEventListener('click', function () { wantConnected = false; disconnect(); session.pid = null; session.joined = false; saveSession(); showJoin(); });
+  }
+
+  function showReplaced() {
+    closeModal();
+    renderedKey = 'replaced';
+    app.innerHTML = '<div class="big-msg" style="margin-top:16vh" data-testid="replaced"><div class="emo">📱</div><h2>The game is open in another tab</h2>' +
+      '<p>Use only one tab, please.</p><p><button class="btn btn-go btn-big" id="playHere">▶ Play here</button></p></div>';
+    $('#playHere').addEventListener('click', function () { showConnecting(); retries = 0; forceReconnect(); });
   }
 
   /* ---------------- GAME RENDERING ---------------- */
@@ -241,7 +252,7 @@
       case 'sab_result': renderSabResult(box, v); break;
       case 'final': renderFinal(box, v); break;
     }
-    if (prevKey.split('|')[0] !== v.phase) { if (v.phase === 'round') SND.play('whoosh'); }
+    if (prevKey.split('|')[0] !== v.phase) { window.scrollTo(0, 0); if (v.phase === 'round') SND.play('whoosh'); }
     liveUpdate();
   }
 
@@ -438,11 +449,13 @@
     var a = v.ans, q = v.q;
     var label = '<div class="big-msg" style="padding:0"><p>🌪️ Chaos round <b>' + v.roundNum + '</b> / ' + v.total + '</p></div>';
     if (v.phase === 'round' && !a) {
-      box.innerHTML = label + timerHtml() + qCardHtml(q, v.hints) + miniHtml(v.you.slots) + plansLeftHtml(v);
+      // timer + plan count stay on screen (sticky) while a small phone scrolls down to the tiles
+      box.innerHTML = '<div class="p-sticky">' + label + timerHtml() + plansLeftHtml(v) + '</div>' + qCardHtml(q, v.hints) + miniHtml(v.you.slots);
       mountBuilder(q);
       return;
     }
     if (!a) a = { absent: true, answer: v.reveal.answer, why: v.reveal.why, tense: v.reveal.tense, lost: -1 };
+    window.scrollTo(0, 0); // the student was scrolled down to the Send button
     if (a.ok) SND.play('good'); else if (!a.absent) SND.play('bad');
     var dying = animateLoss(a, v);
     box.innerHTML = label + feedbackHtml(a, v) + miniHtml(v.you.slots, { dying: dying }) + plansLeftHtml(v) +

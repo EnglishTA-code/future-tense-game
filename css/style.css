@@ -327,3 +327,44 @@ body.host { height: 100vh; overflow: hidden; font-size: clamp(14px, 1.05vw, 22px
   .lobby, .final, .chaos-main { grid-template-columns: 1fr; }
   .h-stage { height: auto; }
 }
+
+/* ===================================================================
+   SMALL PHONES (QA fixes)
+   =================================================================== */
+/* avatar grid fits 360px-wide phones (6 columns used to overflow the card) */
+.avatar-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.avatar-grid button { min-width: 0; }
+@media (max-width: 380px) {
+  .join-card { padding: 14px; }
+  .avatar-grid { gap: 6px; }
+  .avatar-grid button { font-size: 1.7rem; }
+}
+/* chaos round: timer + plans left stay visible while scrolling to the tiles */
+.p-sticky {
+  position: -webkit-sticky; position: sticky; top: 0; z-index: 20;
+  display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 8px;
+  margin: 0 -12px; padding: 6px 12px 8px; border-radius: 0 0 18px 18px;
+  background: linear-gradient(135deg, var(--bg1), var(--bg2)); background-attachment: fixed;
+}
+.p-sticky > .big-msg { grid-column: 1; grid-row: 1; padding: 0; text-align: left; }
+.p-sticky > .big-msg p { margin: 0; font-size: 1.05rem; }
+.p-sticky > .timer-text { grid-column: 2; grid-row: 1; margin: 0; font-size: 1.25rem; }
+.p-sticky > .timerbar { grid-column: 1 / -1; grid-row: 2; }
+.p-sticky > .plans-left { grid-column: 1 / -1; grid-row: 3; }
+/* Clear / Send stay reachable at the bottom of the screen while the tiles are on screen */
+.builder-actions {
+  position: -webkit-sticky; position: sticky; bottom: 0; z-index: 5;
+  background: var(--card); padding: 8px 0 max(6px, env(safe-area-inset-bottom));
+}
+/* short screens (iPhone SE / 360x640 Android): smaller picture + tighter spacing on the question card */
+@media (max-height: 760px) {
+  .q-card { padding: 12px; }
+  .q-card .q-emo { font-size: 2.8rem; }
+  .q-card .q-title { font-size: 1.35rem; margin: 0; }
+  .q-card .q-text { margin: 2px 0 6px; }
+  .q-card .q-cue, .q-card .q-clue { margin-bottom: 6px; }
+  .builder { gap: 8px; }
+  .answer-line { min-height: 62px; }
+  .tile { min-height: 48px; padding: 8px 13px; font-size: 1.22rem; }
+  .tile-bank { gap: 8px; }
+}
