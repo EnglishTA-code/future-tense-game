@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Plan Your Weekend, Survive the Chaos!</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌪️</text></svg>">
+</head>
+<body class="player">
+  <div class="p-wrap" style="padding-top:8vh">
+    <div class="big-msg"><div class="emo bob">🗓️🌪️</div></div>
+    <h1 class="logo" style="text-align:center;font-size:2.4rem;margin:0">Plan Your Weekend,<br><span class="accent">Survive the Chaos!</span></h1>
+    <div class="card" style="text-align:center">
+      <p style="font-size:1.2rem;margin-top:0">A future tenses game 🎮</p>
+      <a href="play.html" class="btn btn-go btn-big" style="display:block;text-decoration:none;margin-bottom:14px" data-testid="go-play">📱 I'm a student — JOIN</a>
+      <a href="host.html" class="btn btn-yellow" style="display:block;text-decoration:none" data-testid="go-host">🖥️ Teacher — host a game</a>
+    </div>
+  </div>
+<script>
+  // keep local test options (e.g. ?peer=local) when moving to the other pages
+  if (location.search) document.querySelectorAll('a[href$=".html"]').forEach(function (a) { a.href = a.getAttribute('href') + location.search; });
+</script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HOST · Plan Your Weekend, Survive the Chaos!</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌪️</text></svg>">
+</head>
+<body class="host">
+  <header class="h-top">
+    <div class="logo">Plan Your Weekend, <span class="accent">Survive the Chaos!</span></div>
+    <div class="room-pill hidden" id="roomPill">Code: <b id="roomPillCode"></b> · <span id="roomPillCount">0</span> 👥</div>
+    <div class="spacer"></div>
+    <button class="btn btn-ghost hidden" id="btnSkip" data-testid="host-skip" title="End the timer now">⏭ Stop timer</button>
+    <button class="btn btn-go hidden" id="btnNext" data-testid="host-next">Next ▶</button>
+    <button class="btn btn-red hidden" id="btnEnd" data-testid="host-end" title="Finish the game and show the leaderboard">⏹ End</button>
+    <button class="btn icon-btn" id="btnMute" title="Sound">🔊</button>
+    <button class="btn icon-btn" id="btnFull" title="Full screen">⛶</button>
+  </header>
+  <main class="h-stage" id="stage">
+    <div class="center-col"><h1 class="mega">Starting…</h1><p class="chaos-text" id="bootMsg">Connecting to the game server…</p></div>
+  </main>
+  <script src="vendor/peerjs.min.js"></script>
+  <script src="vendor/qrcode.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/content.js"></script>
+  <script src="js/sound.js"></script>
+  <script src="js/common.js"></script>
+  <script src="js/host.js"></script>
+</body>
+</html>
