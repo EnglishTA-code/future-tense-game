@@ -357,7 +357,9 @@
     });
     S.phase = 'reveal';
     var right = Object.keys(R.answers).filter(function (k) { return R.answers[k].ok; }).length;
-    SND.play(right ? 'good' : 'bad'); setTimeout(function () { SND.play('boom'); }, 500);
+    SND.music(null);
+    if (right) SND.stinger('reveal'); else SND.play('bad');
+    setTimeout(function () { SND.play('boom'); }, 500);
     commit();
   }
   function fastest(R, n) {
@@ -420,7 +422,7 @@
       if (P(a)) P(a).score += 100;
     });
     S.phase = 'sab_result';
-    SND.play('whoosh'); setTimeout(function () { SND.play('boom'); }, 350);
+    SND.stinger('hit'); setTimeout(function () { SND.play('boom'); }, 350);
     commit();
   }
   function attackersOf(pid) { var B = S.sab; return B.attackers.filter(function (a) { return B.picks[a] === pid; }); }
@@ -428,7 +430,7 @@
   /* ---------------- final ---------------- */
   function finish() {
     if (S.phase === 'round') endRound();
-    S.phase = 'final'; SND.play('fanfare'); commit();
+    S.phase = 'final'; commit(); // render → music('podium') plays the fanfare stinger
     setTimeout(function () { U.confetti(180); }, 300);
   }
   function playAgain() {
@@ -578,8 +580,26 @@
     $('#roomPillCount').textContent = players().length;
   }
 
+  /* v3 music (host only): one track per phase, the sound engine never stacks two loops */
+  function musicFor() {
+    switch (S.phase) {
+      case 'lobby': return 'lobby';
+      case 'build': case 'ready': return 'planning';
+      case 'round': return S.round && now() < S.round.endsAt ? 'round' : null; // stops when the answer time is over
+      case 'final': return 'podium';
+      default: return null; // reveal / chaos cards: quiet, so the teacher can talk (stingers only)
+    }
+  }
+  function syncMusic() {
+    if (!S) return;
+    SND.music(musicFor());
+    if (S.phase === 'round' && S.round) SND.urgent(S.round.endsAt - now() <= 5000);
+    var h = $('#musicHint');
+    if (h) { var hide = !SND.supported() || SND.unlocked() || SND.isMuted(); if (h.hidden !== hide) h.hidden = hide; }
+  }
   function render() {
     if (!S) return;
+    syncMusic();
     if (!peerReady) { controls(); return; }
     var key = S.phase + ':' + S.roundIdx + ':' + (S.sab ? S.sab.num : 0) + ':' + S.code;
     if (key !== stageKey) {
@@ -842,6 +862,7 @@
         else if (S.phase === 'sab_pick') resolveAttacks();
       }
     }
+    syncMusic();
     // presence: refresh chips every second (online / offline)
     if (t % 1000 < 260) { renderLive(); if (S.phase === 'round') checkAllAnswered(); }
   }
@@ -849,6 +870,8 @@
   /* ---------------- boot ---------------- */
   function boot() {
     U.muteButton($('#btnMute'));
+    SND.enableMusic(); // the HOST is the only page with background music (player.js never calls this)
+    document.body.appendChild(U.el('<div class="music-hint" id="musicHint" data-testid="music-hint" hidden>Click for music 🎵</div>'));
     $('#btnFull').addEventListener('click', function () {
       if (document.fullscreenElement) document.exitFullscreen(); else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
     });

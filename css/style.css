@@ -392,3 +392,6 @@ body.host { height: 100vh; overflow: hidden; font-size: clamp(14px, 1.05vw, 22px
 .round-picker .rp-btn:hover { transform: scale(1.06); }
 .round-picker .rp-btn.on { background: #ffd43b; color: #212529; border-color: #fff; box-shadow: 0 0 0 .35vw rgba(255,212,59,.55), 0 .4vw 0 rgba(0,0,0,.25); transform: scale(1.1); }
 .round-picker .rp-btn.on::before { content: '✔ '; }
+/* v3: small "click for music" hint on the host until the browser allows audio */
+.music-hint { position: fixed; left: 1vw; bottom: 1vw; z-index: 50; background: rgba(0,0,0,.35); color: #fff; font-weight: 700; font-size: 1.1vw; padding: .35vw .9vw; border-radius: 2vw; pointer-events: none; opacity: .85; }
+.music-hint[hidden] { display: none; }
