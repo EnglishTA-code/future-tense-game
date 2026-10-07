@@ -395,3 +395,6 @@ body.host { height: 100vh; overflow: hidden; font-size: clamp(14px, 1.05vw, 22px
 /* v3: small "click for music" hint on the host until the browser allows audio */
 .music-hint { position: fixed; left: 1vw; bottom: 1vw; z-index: 50; background: rgba(0,0,0,.35); color: #fff; font-weight: 700; font-size: 1.1vw; padding: .35vw .9vw; border-radius: 2vw; pointer-events: none; opacity: .85; }
 .music-hint[hidden] { display: none; }
+/* connection status while joining / reconnecting (relay transport) */
+.net-status { margin: 10px 0 0; font-size: 1rem; text-align: center; color: #5c3d00; background: #fff3bf; border: 2px solid #e8a500; border-radius: 12px; padding: 6px 10px; }
+.net-status[hidden] { display: none; }

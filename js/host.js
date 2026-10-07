@@ -1,14 +1,14 @@
 /* =========================================================================
    HOST — runs on the teacher's computer (projector). This browser tab IS the
-   game server: it owns the whole game state and talks to every phone over
-   PeerJS (WebRTC data channels). Keep this tab open during the game!
+   game server: it owns the whole game state and talks to every phone through
+   public relays over wss:// on port 443 (js/net.js). Keep this tab open during the game!
    ========================================================================= */
 (function () {
   'use strict';
   var C = window.FTG_CONTENT, CFG = window.FTG_CONFIG, U = window.FTG, SND = window.FTG_SOUND;
   var esc = U.esc, $ = U.$;
   var SAVE_KEY = 'ftg-host-v1';
-  var setup = CFG.peerSetup();
+  var setup = CFG.relaySetup();
   var peer = null, peerReady = false, peerOpenAt = 0, conns = {}, S = null;
   var stageKey = '', saveTimer = null, lastTickSec = -1, pendingTimers = {};
 
@@ -162,45 +162,48 @@
   /* ---------------- networking ---------------- */
   function bootMsg(t) { var b = $('#bootMsg'); if (b) b.textContent = t; }
 
+  /* "peer" = this tab's link to the relays (js/net.js); the room code + a random session salt name the session */
+  var netDown = false;
   function startPeer(code, resume, attempt) {
     attempt = attempt || 0;
     peerReady = false;
     if (peer && !peer.destroyed) { try { peer.destroy(); } catch (e) { /* */ } }
-    var p = new Peer(CFG.peerPrefix + code.toLowerCase(), setup.options);
-    peer = p;
-    p.on('open', function () {
-      if (p !== peer) return;
-      peerReady = true; peerOpenAt = now(); stageKey = ''; render();
-    });
-    p.on('connection', onConnection);
-    p.on('disconnected', function () {
-      // lost the broker (signalling) — existing phone connections keep working
-      setTimeout(function () { if (p === peer && !p.destroyed && p.disconnected) { try { p.reconnect(); } catch (e) { /* */ } } }, 1500);
-    });
-    p.on('error', function (err) {
-      if (p !== peer) return;
-      var type = err && err.type;
-      if (type === 'unavailable-id') {
+    if (!S.salt || !resume) { S.salt = U.rid(10); save(); }
+    var p;
+    p = FTG_NET.host(code, S.salt, {
+      onOpen: function () {
+        if (p !== peer) return;
+        peerReady = true; peerOpenAt = now(); stageKey = ''; render();
+      },
+      onConnection: onConnection,
+      onTaken: function () { // somebody else is already hosting this code (another teacher, or this game in another tab)
+        if (p !== peer) return;
         if (resume && attempt < 15) {
           bootMsg('Getting room ' + code + ' back… (' + (attempt + 1) + ')');
-          setTimeout(function () { startPeer(code, true, attempt + 1); }, 2000);
+          setTimeout(function () { if (p === peer) startPeer(code, true, attempt + 1); }, 2000);
         } else {
           S.code = makeCode(); save(); startPeer(S.code, false, 0);
         }
-      } else if (type === 'peer-unavailable') {
-        /* not relevant for host */
-      } else if (type === 'network' || type === 'server-error' || type === 'socket-error' || type === 'socket-closed' || type === 'browser-incompatible') {
+      },
+      onStatus: function (st) {
+        if (p !== peer) return;
         if (!peerReady) {
-          bootMsg('Cannot reach the PeerJS server (' + type + '). Check the internet connection. Retrying…');
-          setTimeout(function () { if (p === peer) startPeer(S.code, true, attempt + 1); }, 4000);
-        } else {
-          U.toast('⚠️ Connection problem (' + type + '). Trying again…');
-          setTimeout(function () { if (p === peer && !p.destroyed && p.disconnected) { try { p.reconnect(); } catch (e) { /* */ } } }, 3000);
+          if (st.up) bootMsg('Connecting to the game server…');
+        } else if (!st.up && !netDown) {
+          netDown = true; U.toast('⚠️ Connection problem. Trying again…');
+        } else if (st.up && netDown) {
+          netDown = false; U.toast('✅ Connected again');
         }
-      } else {
-        console.warn('Peer error', type, err);
       }
     });
+    peer = p;
+    (function watchBoot() { // no relay reachable yet: say so (they keep retrying by themselves)
+      setTimeout(function () {
+        if (p !== peer || peerReady) return;
+        if (!p.status().up) bootMsg('Cannot reach the game server. Check the internet connection (or ask IT whether the school Wi-Fi blocks it). Retrying…');
+        watchBoot();
+      }, 6000);
+    })();
   }
 
   function onConnection(conn) {
@@ -435,9 +438,9 @@
   }
   function playAgain() {
     var keep = players();
-    var code = S.code, settings = S.settings;
+    var code = S.code, settings = S.settings, salt = S.salt;
     var fx = S.fx;
-    S = newState(code); S.settings = settings; S.fx = fx; // keep fx ids unique so phones still animate
+    S = newState(code); S.settings = settings; S.fx = fx; S.salt = salt; // same room, same session // keep fx ids unique so phones still animate
     keep.forEach(function (p) {
       p.score = 0; p.slots = [null, null, null, null, null, null]; p.stats = { right: 0, wrong: 0, late: 0, tense: {} }; delete p.lateStart; p.rebuilds = 0;
       S.players[p.pid] = p; S.order.push(p.pid);
@@ -885,8 +888,11 @@
       if ((e.key === 'n' || e.key === 'ArrowRight') && !$('#btnNext').classList.contains('hidden')) { e.preventDefault(); next(); }
     });
     window.addEventListener('beforeunload', function () { try { localStorage.setItem(SAVE_KEY, JSON.stringify(S)); } catch (e) { /* */ } });
+    // laptop woke up / Wi-Fi came back: reconnect to the relays now instead of waiting for the back-off timer
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && peer && peer.poke) peer.poke(); });
+    window.addEventListener('online', function () { if (peer && peer.poke) peer.poke(); });
 
-    if (typeof Peer === 'undefined') { bootMsg('PeerJS failed to load.'); return; }
+    if (!window.FTG_NET) { bootMsg('The game failed to load (js/net.js). Reload the page.'); return; }
 
     var saved = null;
     try { saved = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) { saved = null; }
@@ -911,6 +917,6 @@
   }
 
   // for automated tests / debugging in the console
-  window.__FTG_HOST = { get state() { return S; }, onlineCount: function () { return onlinePlayers().length; }, attackerCount: attackerCount, next: next, kick: kick, viewFor: function (pid) { return viewFor(P(pid)); } };
+  window.__FTG_HOST = { get state() { return S; }, net: function () { return peer && peer.status(); }, onlineCount: function () { return onlinePlayers().length; }, attackerCount: attackerCount, next: next, kick: kick, viewFor: function (pid) { return viewFor(P(pid)); } };
   boot();
 })();

@@ -1,15 +1,17 @@
 /* =========================================================================
-   CONFIG — edit here if needed.
-   PRODUCTION uses the free public PeerJS cloud broker (0.peerjs.com),
-   which is PeerJS's default when no host is given.
-   For LOCAL TESTING ONLY you can add ?peer=local to the host URL
-   (expects `npm run peer` from the dev/ folder: localhost:9000, path /ftg).
-   The host page passes the same option on to the player link / QR code.
+   CONFIG: edit here if needed.
+   NETWORK: the host and the phones talk through public relays over wss:// on port 443
+   (see js/net.js). No account, no server of our own. Each message goes out on ALL the
+   relays below at once and the first copy wins, so one relay being down or blocked
+   doesn't stop the game.
+   URL options (the host page passes them on to the player link / QR code):
+     ?relay=local                   LOCAL TESTING ONLY (`npm run relay` in dev/: ws://localhost:7447)
+     ?relay=primal | snort | shiftr  use only these relays (comma-separated), e.g. to test one
+                                     relay on the school Wi-Fi
    ========================================================================= */
 (function () {
   'use strict';
   var CONFIG = {
-    peerPrefix: 'flss-ftg-',          // room code ABCD -> PeerJS id "flss-ftg-abcd"
     codeLength: 4,
     codeAlphabet: 'ABCDEFGHJKLMNPQRSTUVWXYZ', // no I / O (look like 1 / 0)
     maxPlayers: 40,
@@ -18,26 +20,28 @@
     lateJoinMin: 3,                    // a NEW player joining after chaos round 1 has started gets the class median of plans left (rounded down), at least this many
     roundOptions: [3, 4, 5, 6], // big round picker on the host lobby (teacher's choice; default 4)
     defaults: { rounds: 4, roundSecs: 20, buildSecs: 120, pickSecs: 15, hints: true },
-    peerDebug: 1                       // 0 = silent, 1 = errors, 2 = warnings, 3 = all
+    netDebug: 0,                       // 1 = log relay up/down in the console
+    // Three independent, free, no-signup relays (3 different organisations, all wss:// on port 443).
+    relays: [
+      { name: 'primal', type: 'nostr', url: 'wss://relay.primal.net' },        // Nostr relay run by Primal (behind Cloudflare)
+      { name: 'snort', type: 'nostr', url: 'wss://relay.snort.social' },       // Nostr relay run by Snort
+      { name: 'shiftr', type: 'mqtt', url: 'wss://public.cloud.shiftr.io', username: 'public', password: 'public' } // shiftr.io public MQTT broker
+    ]
   };
 
-  // Returns { options for new Peer(), query string to pass on to players }
-  CONFIG.peerSetup = function () {
-    var q = new URLSearchParams(location.search);
-    var opts = { debug: CONFIG.peerDebug };
-    var pass = new URLSearchParams();
-    if (q.get('peer') === 'local') {
-      opts.host = q.get('peerHost') || location.hostname || 'localhost';
-      opts.port = parseInt(q.get('peerPort') || '9000', 10);
-      opts.path = q.get('peerPath') || '/ftg';
-      opts.secure = location.protocol === 'https:' && q.get('peerSecure') !== '0';
-      // Local test mode: no STUN/TURN needed on one machine / LAN.
-      opts.config = { iceServers: [] };
-      pass.set('peer', 'local');
-      ['peerHost', 'peerPort', 'peerPath', 'peerSecure'].forEach(function (k) { if (q.get(k)) pass.set(k, q.get(k)); });
+  // Returns { relays: [...], passOn: query string to pass on to players }
+  CONFIG.relaySetup = function () {
+    var q = new URLSearchParams(location.search), r = (q.get('relay') || '').trim(), pass = new URLSearchParams();
+    var relays = CONFIG.relays;
+    if (r === 'local') {
+      var h = location.hostname || 'localhost', port = q.get('relayPort') || '7447';
+      relays = [{ name: 'local-nostr', type: 'nostr', url: 'ws://' + h + ':' + port + '/' }, { name: 'local-mqtt', type: 'mqtt', url: 'ws://' + h + ':' + port + '/mqtt' }];
+      pass.set('relay', 'local'); if (q.get('relayPort')) pass.set('relayPort', port);
+    } else if (r) {
+      var names = r.toLowerCase().split(','), pick = CONFIG.relays.filter(function (x) { return names.indexOf(x.name) >= 0; });
+      if (pick.length) { relays = pick; pass.set('relay', r); }
     }
-    // else: PeerJS defaults = public cloud broker 0.peerjs.com:443 + its STUN/TURN servers
-    return { options: opts, passOn: pass.toString() };
+    return { relays: relays, passOn: pass.toString() };
   };
 
   window.FTG_CONFIG = CONFIG;

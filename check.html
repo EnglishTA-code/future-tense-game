@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Network check · Plan Your Weekend, Survive the Chaos!</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>">
+<style>
+  .chk { max-width: 640px; margin: 16px auto; padding: 0 12px; }
+  .chk .row { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 2px dashed #ddd; font-size: 1.05rem; }
+  .chk .row b { min-width: 9.5em; }
+  .chk .big { font-size: 1.3rem; text-align: center; margin: 14px 0; }
+  .chk small { color: #555; }
+</style>
+</head>
+<body class="player">
+  <div class="chk">
+    <h1 class="logo" style="text-align:center;font-size:1.7rem">📡 Network check</h1>
+    <div class="card">
+      <p>Open this page on a <b>student iPad on the school Wi-Fi</b> before class. It checks whether the game's message relays can be reached (secure WebSockets on port 443, the same kind of traffic as Kahoot).</p>
+      <div id="rows"></div>
+      <div class="big" id="summary" data-testid="check-summary">Checking… ⏳</div>
+      <p style="text-align:center"><button class="btn btn-go" id="again">↻ Check again</button></p>
+      <small>The game sends every message through all the relays at once and uses whichever arrives first, so it works if <b>at least one</b> relay is ✅. Two or more ✅ is best.</small>
+    </div>
+  </div>
+  <script src="vendor/nostr-sign.min.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/net.js"></script>
+  <script>
+  (function () {
+    var relays = FTG_CONFIG.relays, rows = document.getElementById('rows'), sum = document.getElementById('summary');
+    function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+    function run() {
+      var done = 0, ok = 0;
+      sum.textContent = 'Checking… ⏳';
+      rows.innerHTML = relays.map(function (r, i) {
+        return '<div class="row" id="r' + i + '" data-testid="check-row"><b>' + esc(r.name) + '</b><span>⏳ checking ' + esc(r.url.replace(/^wss:\/\//, '')) + '…</span></div>';
+      }).join('');
+      relays.forEach(function (r, i) {
+        FTG_NET.selfTest(r, function (res) {
+          done++; if (res.ok) ok++;
+          document.querySelector('#r' + i + ' span').innerHTML = res.ok ?
+            '✅ works <small>(connect ' + res.connectMs + ' ms, message there and back ' + res.rttMs + ' ms)</small>' :
+            '❌ ' + esc(res.error) + ' <small>' + esc(r.url) + '</small>';
+          if (done === relays.length) {
+            sum.innerHTML = ok >= 2 ? '✅ <b>Good to go!</b> ' + ok + ' of ' + relays.length + ' relays work on this network.' :
+              ok === 1 ? '⚠️ <b>It should work</b>, but only 1 relay gets through. Ask IT to allow the ❌ ones (wss, port 443).' :
+              '❌ <b>Blocked.</b> No relay can be reached from this network. Ask IT to allow secure WebSockets (port 443) to: ' + relays.map(function (x) { return esc(x.url.replace(/^wss:\/\//, '')); }).join(', ') + '.';
+            sum.setAttribute('data-ok', ok);
+          }
+        });
+      });
+    }
+    document.getElementById('again').addEventListener('click', run);
+    run();
+  })();
+  </script>
+</body>
+</html>

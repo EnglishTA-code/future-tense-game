@@ -1,7 +1,7 @@
 # 🗓️🌪️ Plan Your Weekend, Survive the Chaos!
 
 A whole-class multiplayer game for practising **future tenses** (S3 ESL). It joins like Kahoot, but it plays as a real game.
-The teacher's browser runs the game. Phones connect to it **peer-to-peer (WebRTC via PeerJS)**.
+The teacher's browser runs the game. Phones talk to it through **free public relays over secure WebSockets (wss://, port 443)**, like Kahoot: no WebRTC, no device-to-device traffic. Every message goes through 3 independent relays at once (Nostr relay.primal.net and relay.snort.social, MQTT public.cloud.shiftr.io) and the first copy wins. Before class, open **check.html** on a student iPad on the school Wi-Fi to check the relays.
 **No server to keep running**: the game is a folder of static files.
 
 | Tense (from the S3E worksheet, Section 5) | Use in the game |

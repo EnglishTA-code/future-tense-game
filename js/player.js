@@ -1,101 +1,100 @@
 /* =========================================================================
-   PLAYER — runs on each student's phone. Talks to the host over PeerJS.
+   PLAYER — runs on each student's phone. Talks to the host through public relays (js/net.js).
    ========================================================================= */
 (function () {
   'use strict';
   var C = window.FTG_CONTENT, CFG = window.FTG_CONFIG, U = window.FTG, SND = window.FTG_SOUND;
   var esc = U.esc, $ = U.$;
   var SESSION_KEY = 'ftg-player-v1';
-  var setup = CFG.peerSetup();
   var app = $('#app');
 
   var session = loadSession();
-  var peer = null, conn = null, connected = false, wantConnected = false, joinedOnce = false;
-  var lastPong = 0, retryTimer = null, pending = null, retries = 0;
+  var link = null, linkCode = null, connected = false, wantConnected = false, joinedOnce = false;
+  var lastPong = 0, retryTimer = null, pending = null, retries = 0, welcomed = false, helloTimer = null, connSince = 0, lastRtt = 0;
   var view = null, viewAt = 0, renderedKey = '', builder = null, animatedFx = {}, modal = null;
-  var deadline = 0;
+  var deadline = 0, hostView = null;
+  // send again (every 2.5 s, max 4 times) until a view from the host confirms it; the host ignores repeats
+  var sureLatest = {};
+  function sendSure(key, msg, confirmed) {
+    sureLatest[key] = msg; // a newer message with the same key replaces this one
+    send(msg);
+    (function again(n) {
+      setTimeout(function () { if (n < 4 && sureLatest[key] === msg && wantConnected && hostView && !confirmed(hostView)) { send(msg); again(n + 1); } }, 2500);
+    })(0);
+  }
 
   function loadSession() { try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null') || {}; } catch (e) { return {}; } }
   function saveSession() { try { localStorage.setItem(SESSION_KEY, JSON.stringify(session)); } catch (e) { /* */ } }
   function banner(on, text) { var b = $('#connBanner'); b.classList.toggle('hidden', !on); if (text) b.textContent = text; }
 
   /* ---------------- connection ---------------- */
-  function hostId() { return CFG.peerPrefix + String(session.code).toLowerCase(); }
-
+  // link = FTG_NET.client(): finds the host of the room code through the relays, then carries messages both ways
   function connect() {
     wantConnected = true;
     clearTimeout(retryTimer);
-    if (!peer || peer.destroyed) {
-      peer = new Peer(setup.options);
-      var p = peer;
-      p.on('open', function () { if (p === peer) openConn(); });
-      p.on('error', function (err) { if (p === peer) onPeerError(err); });
-      p.on('disconnected', function () {
-        setTimeout(function () { if (p === peer && !p.destroyed && p.disconnected && wantConnected) { try { p.reconnect(); } catch (e) { /* */ } } }, 1000);
+    if (link && linkCode !== session.code) { link.close(); link = null; }
+    if (!link) {
+      linkCode = session.code; connSince = Date.now();
+      var l = link = FTG_NET.client(session.code, {
+        onOpen: function () { // found the host
+          if (l !== link || !wantConnected) return;
+          connected = true; retries = 0; lastPong = Date.now(); welcomed = false;
+          sayHello();
+          netStatus();
+        },
+        onData: function (m) { if (l === link) onMsg(m); },
+        onClose: function () { if (l === link) { connected = false; scheduleRetry(); } }, // the host closed this link
+        onNotFound: function () {
+          if (l !== link || connected) return;
+          if (!joinedOnce) {
+            wantConnected = false; disconnect();
+            showJoin('Room "' + session.code + '" was not found. Check the code on the big screen. 🔍');
+          } // after joining once: keep looking (the teacher is probably reloading the host page)
+        },
+        onStatus: function () { if (l === link) netStatus(); }
       });
-      p.on('close', function () { if (p === peer) { connected = false; scheduleRetry(); } });
-    } else if (peer.disconnected) {
-      try { peer.reconnect(); } catch (e) { peer.destroy(); peer = null; scheduleRetry(200); }
-    } else if (peer.open) {
-      openConn();
+    } else {
+      link.reconnect();
     }
+    netStatus();
   }
-  function openConn() {
-    if (!wantConnected) return;
-    if (conn && conn.open && connected) return;
-    if (conn) { try { conn.close(); } catch (e) { /* */ } }
-    var c = peer.connect(hostId(), { reliable: true, serialization: 'json' });
-    conn = c;
-    c.on('open', function () {
-      if (c !== conn) return;
-      connected = true; retries = 0; lastPong = Date.now();
-      c.send({ t: 'hello', pid: session.pid, name: session.name, avatar: session.avatar });
-    });
-    c.on('data', function (m) { if (c === conn) onMsg(m); });
-    var lost = function () { if (c === conn) { connected = false; conn = null; scheduleRetry(); } };
-    c.on('close', lost);
-    c.on('error', lost);
-    setTimeout(function () { if (c === conn && !c.open) { try { c.close(); } catch (e) { /* */ } conn = null; scheduleRetry(); } }, 9000);
-  }
-  function onPeerError(err) {
-    var type = err && err.type;
-    if (type === 'peer-unavailable') {
-      if (!joinedOnce) {
-        wantConnected = false;
-        showJoin('Room "' + session.code + '" was not found. Check the code on the big screen. 🔍');
-        return;
-      }
-      scheduleRetry(2500); // host is probably refreshing
-      return;
-    }
-    if (!joinedOnce && retries > 3) {
-      showJoin('Cannot connect (' + type + '). Check your internet and try again. Ask your teacher if school Wi-Fi blocks the game.');
-      wantConnected = false;
-      return;
-    }
-    if (peer && (peer.destroyed || type === 'network' || type === 'server-error' || type === 'socket-error' || type === 'socket-closed')) {
-      // start over with a fresh Peer next time
-      try { peer.destroy(); } catch (e) { /* */ }
-      peer = null;
-    }
-    scheduleRetry();
+  // "hello" until the host answers (welcome / reject): a message can be lost while a relay reconnects
+  function sayHello() {
+    clearTimeout(helloTimer);
+    if (!connected || welcomed || !wantConnected) return;
+    send({ t: 'hello', pid: session.pid, name: session.name, avatar: session.avatar });
+    helloTimer = setTimeout(sayHello, 3000);
   }
   function scheduleRetry(ms) {
     if (!wantConnected) return;
     if (joinedOnce) banner(true, '📡 Reconnecting…');
     clearTimeout(retryTimer);
     retries++;
-    retryTimer = setTimeout(connect, ms || Math.min(1500 + retries * 500, 5000));
+    retryTimer = setTimeout(function () { if (wantConnected) connect(); }, ms || Math.min(1000 + retries * 500, 4000));
   }
   function send(m) {
-    if (conn && conn.open && connected) { try { conn.send(m); return true; } catch (e) { /* */ } }
+    if (link && connected && wantConnected) return link.send(m);
     return false;
   }
   function forceReconnect() {
-    connected = false;
-    if (conn) { var c = conn; conn = null; try { c.close(); } catch (e) { /* */ } }
+    connected = false; welcomed = false;
+    if (joinedOnce && wantConnected) banner(true, '📡 Reconnecting…');
     connect();
   }
+  /* clear status while joining / reconnecting (the relays keep retrying by themselves) */
+  function netStatus() {
+    var st = link ? link.status() : null, msg = '';
+    if (wantConnected && !connected && st) {
+      var waited = Date.now() - connSince;
+      if (!st.up && waited > 5000) msg = '📡 Can\'t reach the game server yet. Still trying… If this doesn\'t go away, the school Wi-Fi may be blocking the game. Tell your teacher.';
+      else if (!st.up) msg = '📡 Connecting…';
+      else msg = '🔎 Looking for room ' + session.code + '…';
+    }
+    var els = [$('#joinStatus'), $('#connStatus')];
+    els.forEach(function (e) { if (e) { e.textContent = msg; e.hidden = !msg; } });
+    if (joinedOnce && wantConnected && !connected && st && !st.up && Date.now() - connSince > 5000) banner(true, '📡 No connection. Still trying…');
+  }
+  setInterval(function () { if (wantConnected && !connected) netStatus(); }, 1000);
   // heartbeat — detects dead connections (e.g. phone was locked)
   setInterval(function () {
     if (!wantConnected) return;
@@ -106,11 +105,13 @@
   }, 3000);
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState !== 'visible' || !wantConnected) return;
+    if (link) link.poke();
     if (!connected || Date.now() - lastPong > 4500) forceReconnect();
     else send({ t: 'sync' });
   });
   window.addEventListener('pageshow', function (e) { if (e.persisted && wantConnected) forceReconnect(); });
   window.addEventListener('online', function () { if (wantConnected) forceReconnect(); });
+  window.addEventListener('pagehide', function () { if (link && !wantConnected) link.close(); });
 
   function onMsg(m) {
     if (!m || typeof m !== 'object') return;
@@ -118,7 +119,7 @@
     switch (m.t) {
       case 'welcome':
         session.pid = m.pid; session.name = m.name; session.avatar = m.avatar; session.joined = true; saveSession();
-        joinedOnce = true; banner(false);
+        joinedOnce = true; welcomed = true; clearTimeout(helloTimer); banner(false); netStatus();
         if (pending) { send(pending); }
         break;
       case 'reject':
@@ -133,19 +134,19 @@
       case 'replaced': // this player was opened in another tab / window -> stop here instead of fighting over the connection
         wantConnected = false; disconnect(); showReplaced();
         break;
-      case 'rejoin':
-        send({ t: 'hello', pid: session.pid, name: session.name, avatar: session.avatar });
+      case 'rejoin': // the host doesn't know this link (e.g. the host page was reloaded): introduce ourselves again
+        welcomed = false; sayHello();
         break;
       case 'view':
         onView(m);
         break;
-      case 'pong': break;
+      case 'pong': if (m.ts) lastRtt = Date.now() - m.ts; break;
     }
   }
   function disconnect() {
-    clearTimeout(retryTimer);
-    if (conn) { var c = conn; conn = null; try { c.close(); } catch (e) { /* */ } }
-    connected = false; banner(false);
+    clearTimeout(retryTimer); clearTimeout(helloTimer);
+    if (link) { var l = link; link = null; l.close(); }
+    connected = false; welcomed = false; banner(false);
   }
 
   /* ---------------- JOIN SCREEN ---------------- */
@@ -166,6 +167,7 @@
           U.AVATARS.map(function (a) { return '<button type="button" data-av="' + a + '"' + (a === avatar ? ' class="sel"' : '') + '>' + a + '</button>'; }).join('') +
         '</div></div>' +
         '<button type="submit" class="btn btn-go btn-big" style="width:100%" id="btnJoin" data-testid="join-btn">Let\'s go! 🚀</button>' +
+        '<p class="net-status" id="joinStatus" data-testid="net-status" hidden></p>' +
       '</form>' +
       '<div style="text-align:center"><button class="btn icon-btn" id="btnMute"></button></div>';
     U.muteButton($('#btnMute'));
@@ -187,7 +189,7 @@
       saveSession();
       $('#btnJoin').disabled = true; $('#btnJoin').textContent = 'Joining… ⏳';
       retries = 0;
-      if (peer && !peer.destroyed && peer.open) { forceReconnect(); } else connect();
+      forceReconnect();
     });
     if (!code) $('#inCode').focus();
   }
@@ -195,8 +197,9 @@
   function showConnecting() {
     renderedKey = 'connecting';
     app.innerHTML = '<div class="big-msg" style="margin-top:20vh"><div class="emo bob">' + esc(session.avatar || '📱') + '</div><h2>Joining room ' + esc(session.code) + '…</h2>' +
-      '<p>Hi ' + esc(session.name) + '! 👋</p><p><button class="btn" id="notMe">Not you? Change</button></p></div>';
+      '<p>Hi ' + esc(session.name) + '! 👋</p><p class="net-status" id="connStatus" data-testid="net-status" hidden></p><p><button class="btn" id="notMe">Not you? Change</button></p></div>';
     $('#notMe').addEventListener('click', function () { wantConnected = false; disconnect(); session.pid = null; session.joined = false; saveSession(); showJoin(); });
+    netStatus();
   }
 
   function showReplaced() {
@@ -210,6 +213,7 @@
   /* ---------------- GAME RENDERING ---------------- */
   function onView(v) {
     view = v; viewAt = performance.now();
+    hostView = JSON.parse(JSON.stringify(v)); // what the host really has (view itself gets optimistic local changes)
     if (v.you && v.you.lateStart && session.lateNote !== v.you.pid) {
       session.lateNote = v.you.pid; saveSession();
       setTimeout(function () { U.toast('⏳ You joined late, so you start with ' + v.you.lateStart + (v.you.lateStart === 1 ? ' plan.' : ' plans.'), 5000); }, 300);
@@ -399,7 +403,7 @@
           SND.play('good');
           tb.disable();
           view.you.slots[slot] = { card: card.id, auto: false, alive: true };
-          send({ t: 'plan', slot: slot, cardId: card.id });
+          sendSure('plan' + slot, { t: 'plan', slot: slot, cardId: card.id }, function (hv) { return hv.phase !== 'build' || !!hv.you.slots[slot]; });
           closeModal();
           updatePlanner(true);
           var s = $('[data-slot="' + slot + '"]'); if (s) s.classList.add('pop-in');
@@ -439,6 +443,11 @@
         var msg = { t: 'answer', key: q.key, tiles: tiles };
         pending = msg;
         send(msg);
+        (function resend(n) { // no result after 2.5 s (message lost on a reconnecting relay)? send it again; the host ignores repeats
+          setTimeout(function () {
+            if (pending === msg && n < 4 && view && view.phase === 'round' && view.q && view.q.key === q.key && !view.ans) { send(msg); resend(n + 1); }
+          }, 2500);
+        })(0);
         SND.play('pop');
         var b = $('.btn-check', tb.root); if (b) b.textContent = 'Sent! ⏳';
       }
@@ -518,7 +527,8 @@
           SND.play('whoosh');
           U.$all('[data-target]', box).forEach(function (x) { x.disabled = true; });
           b.classList.add('mine');
-          send({ t: 'pick', target: b.getAttribute('data-target') });
+          var sabNum = v.sab.num;
+          sendSure('pick', { t: 'pick', target: b.getAttribute('data-target') }, function (hv) { return hv.phase !== 'sab_pick' || !hv.sab || hv.sab.num !== sabNum || !!hv.sab.myPick; });
         });
       });
       SND.play('alarm');
@@ -577,7 +587,7 @@
 
   /* ---------------- boot ---------------- */
   (function boot() {
-    if (typeof Peer === 'undefined') { app.innerHTML = '<div class="card">Could not load the game (PeerJS). Check your internet.</div>'; return; }
+    if (!window.FTG_NET) { app.innerHTML = '<div class="card">Could not load the game. Check your internet and reload the page.</div>'; return; }
     var q = new URLSearchParams(location.search);
     var urlCode = (q.get('code') || '').toUpperCase();
     if (session.joined && session.pid && session.name && session.code && (!urlCode || urlCode === session.code)) {
@@ -590,5 +600,5 @@
   })();
 
   // test hooks (used by dev/test-webkit-ui.mjs to render screens without a network)
-  window.__FTG_PLAYER = { get view() { return view; }, get session() { return session; }, get connected() { return connected; }, debugView: function (v) { onView(v); } };
+  window.__FTG_PLAYER = { get view() { return view; }, get session() { return session; }, get connected() { return connected; }, get rtt() { return lastRtt; }, net: function () { return link && link.status(); }, debugView: function (v) { onView(v); } };
 })();
