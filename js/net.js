@@ -1,14 +1,16 @@
 /* =========================================================================
    NET: how the host and the phones talk.
-   Everything goes through public RELAYS over secure WebSockets (wss://, port 443),
-   the same kind of traffic as Kahoot or any website. Phones never connect to each other
-   or to the teacher's computer directly, so school Wi-Fi "client isolation" and UDP or
-   WebRTC blocking don't matter.
+   MAIN connection: our own Firebase Realtime Database (official SDK, vendor/firebase-rtdb.min.js,
+   wss:// or https long-polling to *.firebasedatabase.app on port 443). Each topic below is a
+   message queue at /ftg/<topic>: senders push(), the listener gets onChildAdded and deletes what
+   it has read; a device's own inbox is also removed by the server when it disconnects.
+   BACKUP: public relays over wss:// (2 Nostr relays + 1 MQTT broker, 3 organisations).
+   Phones never connect to each other or to the teacher's computer directly, so school Wi-Fi
+   "client isolation" and UDP or WebRTC blocking don't matter.
 
-   Every message is sent on ALL relays at once (config.js -> relays): 2 Nostr relays
-   plus 1 MQTT broker, run by 3 different organisations. The first copy to arrive wins
-   and the duplicates are dropped, so if one relay is slow, blocked or down, the game
-   keeps going on the others with no switch-over delay.
+   Every message is sent on ALL connections that are up (config.js -> relays). The first copy
+   to arrive wins and the duplicates are dropped, so if Firebase or a relay is slow, blocked or
+   down on one device, the game keeps going on the others with no switch-over delay.
 
    Privacy and namespacing: topic names are SHA-256 hashes of (room code + random session
    salt + random device id), so they can't be guessed. Payloads are AES-GCM encrypted with
@@ -20,6 +22,7 @@
   var SIGN = window.FTG_NOSTR_SIGN; // vendor/nostr-sign.min.js (missing on very old browsers -> Nostr relays are skipped, MQTT still works)
   var KIND = 25913; // Nostr "ephemeral" kind (20000-29999): relays pass these on but never store them
   var subtle = window.crypto && window.crypto.subtle;
+  var FB = window.FTG_FIREBASE; // vendor/firebase-rtdb.min.js (if it failed to load, the relays still work)
 
   function now() { return Date.now(); }
   function rid(n) {
@@ -171,7 +174,9 @@
   function nostrResub() {
     var t = Object.keys(this.net.subs);
     if (!this.subId) this.subId = 'f' + rid(8);
-    if (t.length) this.send(JSON.stringify(['REQ', this.subId, { kinds: [KIND], '#t': t }]));
+    // limit 0 = only NEW events: some relays (e.g. Primal) keep "ephemeral" events and would otherwise replay old
+    // messages to a fresh subscriber, e.g. an old "hello" from a reloaded phone to a refreshed host page
+    if (t.length) this.send(JSON.stringify(['REQ', this.subId, { kinds: [KIND], '#t': t, limit: 0 }]));
   }
   function nostrPing() { this.resub(); } // the relay answers with EOSE = proof the line is alive
 
@@ -233,6 +238,82 @@
   Sock.prototype.resub = function () { if (this.up) return (this.kind === 'mqtt' ? mqttResub : nostrResub).call(this); };
   Sock.prototype.ping = function () { return (this.kind === 'mqtt' ? mqttPing : nostrPing).call(this); };
 
+  /* ---------- Firebase Realtime Database (MAIN): topic t = queue at /ftg/<t> ---------- */
+  var fbDb = null, PUSH_CHARS = '-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz';
+  function fbDatabase(spec) {
+    if (!fbDb) fbDb = FB.getDatabase(FB.initializeApp(spec.config, 'ftg'), spec.config.databaseURL);
+    return fbDb;
+  }
+  function pushPrefix(ms) { var s = ''; for (var i = 0; i < 8; i++) { s = PUSH_CHARS.charAt(ms % 64) + s; ms = Math.floor(ms / 64); } return s; } // = time part of a push() key
+  function FbSock(spec, net) {
+    this.spec = spec; this.net = net; this.name = spec.name || 'firebase'; this.kind = 'firebase';
+    this.up = false; this.dead = false; this.listen = {}; this.offset = 0; this.del = {}; this.delTimer = null; this.unsubs = [];
+  }
+  FbSock.prototype.start = function () {
+    var self = this;
+    window.addEventListener('pagehide', function () { if (!self.dead) self._flush(); }); // page closing: delete what was read
+    try { self.db = fbDatabase(self.spec); } catch (e) { warn('firebase could not start', e); return; }
+    self.unsubs.push(FB.onValue(FB.ref(self.db, '.info/serverTimeOffset'), function (s) { self.offset = +s.val() || 0; }));
+    self.unsubs.push(FB.onValue(FB.ref(self.db, '.info/connected'), function (s) {
+      var up = !!s.val();
+      if (self.dead || up === self.up) return;
+      self.up = up;
+      if (up) { self.resub(); self._onDisc(); }
+      self.net._sockChange(self);
+    }));
+  };
+  FbSock.prototype._ref = function (t) { return FB.ref(this.db, 'ftg/' + t); };
+  FbSock.prototype._onDisc = function () { // the server deletes this device's own inboxes if it drops off (re-armed after every reconnect)
+    var self = this; Object.keys(self.listen).forEach(function (t) { if (self.net.own[t]) FB.onDisconnect(self._ref(t)).remove().then(null, function () {}); });
+  };
+  FbSock.prototype.resub = function () {
+    if (!this.up) return;
+    var want = this.net.subs, k;
+    for (k in this.listen) if (!want[k]) { this.listen[k](); delete this.listen[k]; }
+    for (k in want) if (!this.listen[k]) this._listen(k);
+  };
+  FbSock.prototype._listen = function (t) {
+    var self = this, r = this._ref(t), start = pushPrefix(now() + this.offset - 5000); // only new messages (5 s margin; push keys use server time)
+    this.listen[t] = FB.onChildAdded(FB.query(r, FB.orderByKey(), FB.startAt(start)), function (snap) {
+      var v = snap.val(); self._gc(t, snap.key);
+      if (typeof v === 'string' && !self.dead) self.net._rx(self, t, v);
+    }, function (err) { warn(self.name + ' refused to listen: ' + (err && err.message)); delete self.listen[t]; });
+    if (this.net.own[t]) {
+      FB.onDisconnect(r).remove().then(null, function () {});
+      // tidy up anything older left in this queue by an earlier session
+      FB.get(FB.query(r, FB.orderByKey(), FB.endBefore(start))).then(function (s) {
+        var u = {}, n = 0; s.forEach(function (c) { u[c.key] = null; n++; }); if (n) FB.update(r, u).then(null, function () {});
+      }, function () {});
+    }
+  };
+  FbSock.prototype._gc = function (t, key) { // delete read messages (batched, after 2 s so other listeners on a shared topic get them too)
+    var self = this; (this.del[t] = this.del[t] || {})[key] = null;
+    if (!this.delTimer) this.delTimer = setTimeout(function () { self._flush(); }, 2000);
+  };
+  FbSock.prototype._flush = function () {
+    var self = this, d = this.del; this.del = {}; clearTimeout(this.delTimer); this.delTimer = null;
+    Object.keys(d).forEach(function (t) { FB.update(self._ref(t), d[t]).then(null, function () {}); });
+  };
+  FbSock.prototype.publish = function (t, payload) {
+    if (!this.up) return false;
+    try { this.lastWrite = FB.push(this._ref(t), payload).then(null, function (e) { warn('firebase refused a message: ' + (e && e.message)); }); return true; } catch (e) { return false; }
+  };
+  FbSock.prototype.keepAlive = function () { /* the SDK keeps the line alive and reconnects by itself */ };
+  FbSock.prototype.poke = function () { // "try again now" (e.g. the iPad just woke up)
+    if (this.dead || this.up || !this.db) return;
+    try { FB.goOffline(this.db); FB.goOnline(this.db); } catch (e) { /* */ }
+  };
+  FbSock.prototype.stop = function () {
+    var self = this; if (this.dead) return;
+    this.dead = true; this._flush();
+    Object.keys(this.listen).forEach(function (t) {
+      self.listen[t]();
+      if (self.net.own[t] && self.db) { FB.onDisconnect(self._ref(t)).cancel().then(null, function () {}); FB.remove(self._ref(t)).then(null, function () {}); }
+    });
+    this.listen = {}; this.unsubs.forEach(function (u) { u(); }); this.unsubs = [];
+    if (this.up) { this.up = false; }
+  };
+
   /* ---------- Net: all relays together + exactly-once, in-order delivery ---------- */
   function Net(code, opts) {
     var self = this;
@@ -242,8 +323,9 @@
     this.onMessage = opts.onMessage; this.onStatus = opts.onStatus;
     this.sk = null;
     if (SIGN) { try { this.sk = SIGN.newKey(); this.pk = SIGN.pubkey(this.sk); } catch (e) { this.sk = null; } }
-    this.socks = (opts.relays || CFG.relaySetup().relays).filter(function (r) { return r.type === 'mqtt' || (r.type === 'nostr' && self.sk); })
-      .map(function (r) { return new Sock(r, self); });
+    this.own = {}; (opts.own || []).forEach(function (t) { self.own[t] = true; }); // topics only this device reads (its inboxes)
+    this.socks = (opts.relays || CFG.relaySetup().relays).filter(function (r) { return r.type === 'mqtt' || (r.type === 'nostr' && self.sk) || (r.type === 'firebase' && FB && r.config); })
+      .map(function (r) { return r.type === 'firebase' ? new FbSock(r, self) : new Sock(r, self); });
     this.lastUp = -1;
     this.timer = setInterval(function () {
       self.socks.forEach(function (s) { s.keepAlive(); });
@@ -274,7 +356,9 @@
     var ev = null, sent = 0, self = this;
     this.socks.forEach(function (s) {
       if (!s.up) return;
-      if (s.kind === 'nostr') {
+      if (s.kind === 'firebase') {
+        if (s.publish(t, payload)) sent++;
+      } else if (s.kind === 'nostr') {
         if (!ev) ev = JSON.stringify(['EVENT', SIGN.finalize({ kind: KIND, created_at: Math.floor(now() / 1000), tags: [['t', t]], content: payload }, self.sk, self.pk)]);
         if (s.send(ev)) sent++;
       } else if (s.send(mPkt(0x30, [mStr('ftg1/' + t), enc.encode(payload)]))) sent++;
@@ -345,6 +429,7 @@
       net.send(T.inbox(c.peer), body, c.plain);
     }
     net = new Net(code, {
+      own: [H, T.inbox(inst)],
       onStatus: function (st) {
         if (st.up && !probeStarted) {
           // is somebody else already hosting this room code? (another teacher, or this game in another tab)
@@ -393,6 +478,7 @@
     var T = new Topics(code), cid = 'c' + rid(12), I = T.inbox(cid), plainMode = !subtle;
     var bound = null, discovering = false, discTimer = null, asks = 0, notFoundSent = false, closed = false;
     var net = new Net(code, {
+      own: [I],
       onStatus: function (st) { if (st.up && discovering && !bound) ask(true); if (h.onStatus) h.onStatus(st); },
       onMessage: function (o) {
         if (closed || !o) return;
@@ -441,13 +527,19 @@
   function selfTest(spec, done) {
     var t0 = now(), tp = topic('t|' + rid(12)), sent = 0, sentAt = {}, got = [], finished = false, connectMs = null;
     if (spec.type === 'nostr' && !SIGN) { done({ name: spec.name, ok: false, error: 'this browser is too old for this relay' }); return; }
+    if (spec.type === 'firebase' && !FB) { done({ name: spec.name, ok: false, error: 'vendor/firebase-rtdb.min.js did not load' }); return; }
     var net = new Net('CHECK', {
-      relays: [spec],
+      relays: [spec], own: [tp],
       onStatus: function (st) { if (st.up && connectMs == null) { connectMs = now() - t0; ping(); } },
       onMessage: function (o) {
         if (!o || o.f !== 'check' || !sentAt[o.k] || o.got) return;
-        o.got = 1; got.push(now() - sentAt[o.k]);
-        if (got.length >= 3) finish(true); else setTimeout(ping, 150);
+        o.got = 1;
+        // Firebase shows our own write to our own listener at once; the real round trip ends when the server confirms the write
+        var fs = spec.type === 'firebase' && net.socks[0], w = fs && fs.lastWrite;
+        (w || Promise.resolve()).then(function () {
+          got.push(now() - sentAt[o.k]);
+          if (got.length >= 3) finish(true); else setTimeout(ping, 150);
+        });
       }
     });
     net.subscribe([tp]);

@@ -1,13 +1,15 @@
 /* =========================================================================
    CONFIG: edit here if needed.
-   NETWORK: the host and the phones talk through public relays over wss:// on port 443
-   (see js/net.js). No account, no server of our own. Each message goes out on ALL the
-   relays below at once and the first copy wins, so one relay being down or blocked
-   doesn't stop the game.
+   NETWORK: the host and the phones talk through Clinton's own Firebase Realtime Database
+   (MAIN connection, wss:// / https:// on port 443) and, as an automatic BACKUP, three free
+   public relays (also wss:// on port 443). See js/net.js and README-network.md.
+   Each message goes out on every connection that is up and the first copy wins, so if
+   Firebase is blocked on one device, that device keeps playing over the relays.
+   To use a different Firebase project: replace the `config` block of the 'firebase' entry.
    URL options (the host page passes them on to the player link / QR code):
      ?relay=local                   LOCAL TESTING ONLY (`npm run relay` in dev/: ws://localhost:7447)
-     ?relay=primal | snort | shiftr  use only these relays (comma-separated), e.g. to test one
-                                     relay on the school Wi-Fi
+     ?relay=firebase | primal | snort | shiftr   use only these (comma-separated), e.g. to test
+                                     one connection on the school Wi-Fi
    ========================================================================= */
 (function () {
   'use strict';
@@ -20,9 +22,21 @@
     lateJoinMin: 3,                    // a NEW player joining after chaos round 1 has started gets the class median of plans left (rounded down), at least this many
     roundOptions: [3, 4, 5, 6], // big round picker on the host lobby (teacher's choice; default 4)
     defaults: { rounds: 4, roundSecs: 20, buildSecs: 120, pickSecs: 15, hints: true },
-    netDebug: 0,                       // 1 = log relay up/down in the console
-    // Three independent, free, no-signup relays (3 different organisations, all wss:// on port 443).
+    netDebug: 0,                       // 1 = log connection up/down in the console
     relays: [
+      // MAIN: Firebase Realtime Database (public web config, safe to publish; access is limited by the
+      // database rules: only /ftg/<key> can be read/written). All game data lives under /ftg/.
+      { name: 'firebase', type: 'firebase', url: 'https://s3-future-tense-default-rtdb.asia-southeast1.firebasedatabase.app',
+        config: {
+          apiKey: 'AIzaSyB1iFwPPjz0ZxzkKZ684LgXaH8Y5O8MUYI',
+          authDomain: 's3-future-tense.firebaseapp.com',
+          databaseURL: 'https://s3-future-tense-default-rtdb.asia-southeast1.firebasedatabase.app',
+          projectId: 's3-future-tense',
+          storageBucket: 's3-future-tense.firebasestorage.app',
+          messagingSenderId: '572485176809',
+          appId: '1:572485176809:web:861ccaeca604a6d7634f78'
+        } },
+      // BACKUP: three independent, free, no-signup relays (3 different organisations, all wss:// on port 443).
       { name: 'primal', type: 'nostr', url: 'wss://relay.primal.net' },        // Nostr relay run by Primal (behind Cloudflare)
       { name: 'snort', type: 'nostr', url: 'wss://relay.snort.social' },       // Nostr relay run by Snort
       { name: 'shiftr', type: 'mqtt', url: 'wss://public.cloud.shiftr.io', username: 'public', password: 'public' } // shiftr.io public MQTT broker
